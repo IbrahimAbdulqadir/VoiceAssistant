@@ -1,0 +1,53 @@
+# Manually-defined app aliases. These always take priority over auto-discovered
+# Start Menu shortcuts, so use this file to fix cases where discovery guesses wrong,
+# or to point at apps that don't have a Start Menu shortcut at all.
+#
+# Format:
+#   alias: "path or command"
+#
+# Aliases are matched case-insensitively and fuzzy-matched, so "chrome", "google chrome"
+# will both hit the same entry if you only define one of them (close enough wins).
+aliases:
+  vscode: "code"
+  vs code: "code"
+  # Windows built-ins with no Start Menu shortcut for discovery to find -- these
+  # resolve fine as bare commands since System32 is always on PATH.
+  notepad: "notepad"
+  calculator: "calc"
+  calc: "calc"
+  paint: "mspaint"
+  explorer: "explorer"
+  file explorer: "explorer"
+  cmd: "cmd"
+  command prompt: "cmd"
+  terminal: "wt"
+  powershell: "powershell"
+  task manager: "taskmgr"
+  control panel: "control"
+  chrome: "google chrome"
+  google chrome: "google chrome"
+
+# Processes the assistant will never be allowed to close, no matter how it's asked.
+# Killing these can crash the desktop session or the OS itself.
+protected_processes:
+  - explorer.exe
+  - csrss.exe
+  - winlogon.exe
+  - wininit.exe
+  - services.exe
+  - lsass.exe
+  - smss.exe
+  - svchost.exe
+  - dwm.exe
+  - system
+  - registry
+  - python.exe
+  - pythonw.exe
+
+# Shell commands/scripts the "run" intent is allowed to execute. Arbitrary shell
+# execution from transcribed speech is a bad idea, so anything not listed here
+# is refused rather than run.
+scripts: {}
+# example:
+#   run tests: "pytest"
+#   backup: "C:\\Users\\me\\scripts\\backup.bat"

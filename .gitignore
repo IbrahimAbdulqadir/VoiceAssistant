@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+logs/
+config/.env
+config/gmail_credentials.json
+config/gmail_token.json
+config/.spotify_cache
+config/voiceprint.npy
+.claude/

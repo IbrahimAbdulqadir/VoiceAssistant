@@ -1,0 +1,24 @@
+# Phase 1 -- command executor (what's implemented now)
+pyyaml
+psutil
+rapidfuzz
+pywin32
+python-dotenv
+
+# Deep app integrations (optional -- fall back gracefully if unconfigured)
+spotipy                      # Spotify Web API (real playback control)
+google-auth-oauthlib         # Gmail API OAuth
+google-api-python-client     # Gmail API client
+
+# Phase 2 -- wake word + speech-to-text (implemented)
+openwakeword         # wake word detection + bundled Silero VAD -- no account needed
+sounddevice          # microphone capture
+faster-whisper       # local speech-to-text, no internet needed
+numpy
+
+# Phase 3 -- speaker verification (implemented, using Resemblyzer)
+resemblyzer          # lightweight voice-embedding model (pulls in torch CPU automatically)
+
+# Phase 4 -- LLM tool-calling for open-ended tasks (implemented, using OpenAI)
+openai
+# anthropic         # Claude -- alternative backend, if using ANTHROPIC_API_KEY instead
