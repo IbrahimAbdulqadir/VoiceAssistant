@@ -2,14 +2,26 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
-## Where things stand right now
+## Where things stand right now (end of session)
+
+The project is now a git repo pushed to
+**https://github.com/IbrahimAbdulqadir/VoiceAssistant** (`main` branch).
+`config/.env` and other secrets are gitignored and were never committed —
+double check this stays true before any future commit that touches config/.
 
 The listener runs hidden (no console window) via a self-healing Windows Task
 Scheduler job (`VoiceAssistantListener`) instead of a plain Startup shortcut —
-see "Autostart" below. It's currently up and running with all fixes below
-applied, including a freshly retrained wake word model. **Not yet confirmed
-live by the user**: whether the retrained model actually stops false-triggering
-on ordinary background speech in practice — that's the next thing to verify.
+see "Autostart" below. `WHISPER_MODEL=base` is the deliberate final choice —
+the user explicitly prioritized fast response over transcription accuracy
+after experiencing both (see "Performance tuning").
+
+**Biggest unfinished thing**: a "fast lane" instant-command-detection system
+(see its own section below) is mid-rollout — a background batch process was
+still training the remaining command words when this session ended, and the
+listener has **not yet been restarted** to actually load the ones already
+trained. Check `wakeword_trainer/batch_train_words2.log` for how far it got
+(it's a detached OS process, so it kept running after the session ended)
+before doing anything else with the fast lane.
 
 To manually restart it after a config/code change:
 ```powershell
@@ -90,6 +102,116 @@ the real interpreter directly if `python` isn't found:
     trigger (only a full sign-out/sign-in does) — the 5-minute heartbeat is
     what recovers it after a mid-session crash, not the unlock itself.
 
+## Fast lane: instant command-word detection (built this session, mid-rollout)
+
+The user's core remaining complaint after all the tuning below was: response
+is still slow because Whisper has to transcribe the *whole* open-ended
+command. His proposal (and it's a good one): since the assistant's actual
+vocabulary is small and known (app names, open/close/minimize, a few media
+controls), train a dedicated instant openWakeWord-style detector for each of
+those words -- exactly like "Spiderman" itself -- instead of transcribing
+freeform speech. openWakeWord can run many such small classifiers **off one
+shared embedding pipeline** at near-zero extra cost, which is what makes this
+practical instead of just moving the slowness around.
+
+**Architecture** (implemented in `assistant/listen.py`):
+- `_load_wake_model()` now loads the main "Spiderman" model **plus every
+  `.onnx` file in `config/command_words/`** into one `Model(wakeword_models=[...])`
+  call. Each file's key is its filename stem (confirmed: openWakeWord keys by
+  basename, e.g. `open.onnx` → key `"open"`).
+- During the normal post-wake-word recording loop, every frame is also
+  checked against all the command-word keys (`FAST_LANE_THRESHOLD=0.85`).
+  Three categories, hardcoded as sets/dicts near the top of `listen.py`:
+  - `ACTION_WORDS` = open, close, minimize (need a target to complete a command)
+  - `TARGET_WORDS` = spotify, chrome, telegram, vscode, notepad (the apps this
+    combines with an action word) -- **needs chess and day_one added once
+    those are trained** (see below), and needs extending for every other app
+    covered in the eventual full rollout
+  - `STANDALONE_COMMANDS` = desktop/wifi/notifications/search/battery/play/
+    pause/next/previous → maps straight to a complete command string (these
+    don't need a second word)
+- The instant an action+target pair or a standalone word clears threshold,
+  the composed text (e.g. `"open spotify"`) is handed directly to
+  `executor.execute()` on the existing background thread, skipping Whisper
+  entirely. If nothing resolves before the **existing** silence-timeout logic
+  ends the recording, it falls through to Whisper exactly as before -- the
+  fast lane is strictly additive, it can only add speed, never remove the
+  existing correctness fallback.
+- New media-control actions were added for this too since they didn't exist
+  yet: `actions.media_play_pause/media_next/media_previous` (standard
+  Windows media virtual-keys) plus `play`/`pause`/`next`/`previous` intents
+  in `executor.py`.
+
+**Training pipeline** (new tooling in `wakeword_trainer/`, separate from the
+VoiceAssistant repo):
+- **Found and fixed a real pre-existing bug** in `train_openwakeword.py`:
+  `WeightedRandomSampler` was imported but never actually wired into the
+  training `DataLoader` (comment said "weighted sampling for imbalanced
+  data", code just did `shuffle=True`). Harmless with "Spiderman"'s mild
+  ~2.4:1 imbalance, but a single command word has far fewer natural positive
+  phrasings (~30 TTS samples vs. the shared 310-file negative set, ~11:1) --
+  without real class balancing the model just learned to always predict
+  "not the word" (F1 stuck at exactly 0.0000 for 20 straight epochs on the
+  first "open" attempt). Fixed by computing per-sample weights and using a
+  real `WeightedRandomSampler` for the train loader. After the fix, "open"
+  reached F1 0.86 / 97% acc; "close" reached F1 0.95 / 98.9% acc (better,
+  since "close" is phonetically less common in ordinary speech than "open").
+- **`wakeword_trainer/train_command_word.py`** (new): trains one word end to
+  end -- generates TTS positives into `data_words/<word>/positive/`, links
+  the shared `data/negative` and `data/confusable` in via Windows directory
+  **junctions** (not copies -- `data_words/<word>/negative` and `.../confusable`
+  are junctions to the main shared folders, so ~330 shared files aren't
+  duplicated per word), trains, and auto-deploys the resulting `.onnx`
+  straight to `VoiceAssistant/config/command_words/<word>.onnx`. Usage:
+  `python train_command_word.py "spotify"` (add `--extra-phrase "vs code"`
+  etc. for alternate phrasings of the same word).
+- **`wakeword_trainer/record_command_word_samples.py`** (new): the
+  per-word equivalent of the original `record_real_samples.py` -- lets the
+  user record real voice takes for a specific command word (saved into the
+  same `data_words/<word>/positive/`), since TTS-only training reproduces the
+  same accent-recognition weakness the original Spiderman model had before
+  real recordings fixed it. **Must be run interactively by the user in a real
+  terminal** (needs live mic input synced to prompts) -- not something that
+  can be automated. Re-run `train_command_word.py <word>` afterward to
+  retrain including the new real samples (TTS generation step skips files
+  that already exist, so it's cheap).
+- **Batch rollout status at session end**: a batch script
+  (`wakeword_trainer/batch_train_words.ps1`, running via a **detached**
+  `Start-Process` so it survives past any single tool call/session) was
+  training the full word list in sequence. ⚠️ **Caution for next time**: at
+  one point during this session, the same batch got launched twice
+  concurrently by accident (once as a backgrounded tool call, then again via
+  Start-Process without killing the first) -- this caused a real failure (a
+  directory-junction race on "close"). Always verify no earlier instance of
+  a long-running background job is still alive (`Get-CimInstance Win32_Process`
+  filtered on the script/command name) before relaunching one.
+  - Done and deployed: `open` (F1 0.86), `close` (F1 0.95), `minimize`,
+    `pause`, `next`. Check `wakeword_trainer/batch_train_words2.log` for
+    anything that finished after the session ended.
+  - Failed and needs a manual retry: `play` (a transient "Connection error"
+    from the OpenAI TTS API killed all 30 attempts in one go -- not a real
+    bug, just retry `python train_command_word.py "play"`).
+  - Still queued in the batch: `previous`, `desktop`, `wifi`,
+    `notifications`, `search`, `battery`, `spotify`, `chrome`, `telegram`,
+    `vscode`, `notepad`.
+  - **Not in the batch at all, but the user already recorded real voice
+    samples for them** (found in `data_words/chess/positive/` and
+    `data_words/day_one/positive/`, 15 real takes each) -- these need
+    `python train_command_word.py "chess"` and `"day_one"` run manually, then
+    added to `TARGET_WORDS` in `listen.py`. "day_one" is presumably the Day
+    One journaling app; "chess" wasn't otherwise discussed.
+  - `spotify` already has 15 real voice takes recorded too, sitting in
+    `data_words/spotify/positive/` waiting for the batch to reach it (or a
+    manual re-run) -- these get included automatically since
+    `train_command_word.py` only regenerates TTS files that don't already
+    exist and picks up everything else in the positive dir.
+- **The listener has not been restarted since deploying any of these
+  models** -- `_load_wake_model()` only picks up `config/command_words/*.onnx`
+  at startup, so none of the fast lane is actually live yet even though
+  several models are already deployed there. Restart the
+  `VoiceAssistantListener` scheduled task once the rollout is far enough
+  along to be worth testing.
+
 ## Performance tuning done this session
 
 - **Whisper model**: was `small` + `beam_size=5` — measured from logs at
@@ -140,9 +262,28 @@ the real interpreter directly if `python` isn't found:
   instead of launching a second copy.
 - **"minimize \<app\>" didn't exist at all**: added `actions.minimize_app` +
   a matching intent in `executor.py`.
+- **"open vscode" piling up extra windows instead of reusing one**: the VS
+  Code CLI opens a brand new window on every invocation unless told
+  otherwise. Fixed by always passing `--reuse-window` in `actions.open_vscode`.
+  Separately, the VS Code CLI (`code`) wasn't on PATH at all for the account
+  running the listener -- found the real install
+  (`C:\Users\SPIDER MAN\Microsoft VS Code\bin\code.cmd`) and added it to the
+  user's permanent PATH.
+- **New system commands added**: "show desktop" (toggles show-desktop via
+  `Shell.Application.ToggleDesktop()`), "open notifications" / "open search"
+  (simulated Win+N / Win+S), "show wifi" (opens `ms-settings:network-wifi`),
+  "show battery" (reports actual `psutil.sensors_battery()` percentage, not
+  just a UI), "mute/unmute speaker" (simulated volume-mute key). See
+  `actions.py`/`executor.py` for all of these plus the media-control ones
+  listed under "Fast lane" above.
 
 ## What's NOT done yet
 
+- **Finish the fast-lane rollout** — see its section above for the exact
+  state: retry `play`, train `chess`/`day_one`, work through the remaining
+  queued words, decide how many need real-voice recordings, add new target
+  words to `TARGET_WORDS` in `listen.py` as they're trained, and actually
+  **restart the listener** to load whatever's been trained so far.
 - **Confirm the retrained wake model actually behaves** in real use — say
   "Spiderman"/"Hi Spiderman" only, and separately have a normal conversation
   nearby, and see if it stays quiet during the latter. If it's still
@@ -155,19 +296,20 @@ the real interpreter directly if `python` isn't found:
 - **Speaker verification enrollment** — run `python main.py --enroll`.
 - **Confirm Spotify OAuth playback control** — "play \<song\> on spotify" via
   the real Web API, not just launching the app.
-- **Rotate the OpenAI API key** — it's been pasted in plain text into chat
-  sessions more than once now (including this one, incidentally, via a config
-  file read). Go to platform.openai.com/api-keys, revoke/regenerate, paste
-  the new one into `config/.env` directly.
+- **Rotate the OpenAI API key** — flagged for rotation multiple times now
+  across multiple sessions and still not done. Go to
+  platform.openai.com/api-keys, revoke/regenerate, paste the new one into
+  `config/.env` directly (never through chat).
 
 ## Config file reference (`config/.env`)
 
 Currently set: `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`,
 `SPOTIFY_REDIRECT_URI`, `WAKE_WORD=Spiderman`, `OPENAI_API_KEY`,
-`WAKE_THRESHOLD=0.9`, `SILENCE_SECONDS=1.0`. Still commented out/unset:
-`WHISPER_MODEL` (code default now `base`, was `small`), `SPEAKER_THRESHOLD`,
-`OPENAI_MODEL`, `ANTHROPIC_API_KEY` (unset — using OpenAI instead),
-`INDICATOR_CORNER`, `SHOW_INDICATOR`.
+`WAKE_THRESHOLD=0.9`, `SILENCE_SECONDS=1.0`, `WHISPER_MODEL=base` (explicit
+user choice — prioritizes speed over accuracy, see "Performance tuning").
+Still commented out/unset: `SPEAKER_THRESHOLD`, `OPENAI_MODEL`,
+`ANTHROPIC_API_KEY` (unset — using OpenAI instead), `INDICATOR_CORNER`,
+`SHOW_INDICATOR`, `FAST_LANE_THRESHOLD` (code default 0.85).
 
 ## Full details
 
