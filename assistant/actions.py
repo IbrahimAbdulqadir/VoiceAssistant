@@ -8,18 +8,20 @@ CLI and (later) a voice/TTS front-end can consume the same functions.
 """
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import webbrowser
 from pathlib import Path
-from typing import Callable, List, Optional, Set
+from typing import Callable, List, Optional, Set, Tuple
 
 import psutil
 import win32api
 import win32con
 import win32gui
 import win32process
+from rapidfuzz import fuzz
 
 from assistant.config import config
 from assistant.resolver import resolve_app_path
@@ -534,8 +536,68 @@ VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m
 _DEFAULT_VIDEO_SEARCH_LOCATIONS = ["videos", "downloads", "desktop", "documents", "home"]
 
 
+# Scene-release filenames are never what you'd actually say out loud (e.g.
+# "Gotham.S01E01.1080p.WEB.x264-GROUP.mkv") -- these strip that junk down to a
+# plain title so voice can match on "gotham" / "the batman" instead of making
+# the user read the whole displayed filename back.
+_SXXEYY_RE = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,2})")
+# "<title> season <N> episode <M>" (also matches the glued short form "s1e1"
+# since every literal in the alternation still only needs the digits adjacent
+# to it, with \s* allowing zero or more spaces around each piece).
+_SEASON_EPISODE_WORDS_RE = re.compile(
+    r"^(.*?)\s*(?:season|s)\s*(\d{1,2})\s*(?:episode|ep|e)\s*(\d{1,2})\s*$",
+    re.IGNORECASE,
+)
+_RELEASE_JUNK_RE = re.compile(
+    r"\b(1080p|720p|480p|2160p|4k|webrip|web[- ]?dl|web|bluray|brrip|bdrip|dvdrip|"
+    r"hdrip|hdtv|x264|x265|h264|h265|hevc|aac\d*|ac3|dts|remux|proper|repack|"
+    r"extended|uncut|multi|dual audio)\b",
+    re.IGNORECASE,
+)
+_YEAR_RE = re.compile(r"\(?\b(19|20)\d{2}\b\)?")
+_NUMBER_WORDS = {
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19", "twenty": "20",
+}
+VIDEO_MATCH_THRESHOLD = 70  # fuzzy title-match score (0-100) below which we give up
+
+
+def _words_to_digits(text: str) -> str:
+    """Whisper doesn't reliably write small spoken numbers as digits ("season one
+    episode one") -- normalize common ones so the season/episode regex, which
+    only looks for digits, still catches them."""
+    return re.sub(r"\b[a-zA-Z]+\b", lambda m: _NUMBER_WORDS.get(m.group(0).lower(), m.group(0)), text)
+
+
+def _clean_title(raw: str) -> str:
+    """Strips season/episode tags, year, resolution/source/codec/release-group
+    junk from a filename stem down to just the show/movie title, normalizing
+    dots/underscores to spaces along the way."""
+    s = raw.replace(".", " ").replace("_", " ")
+    s = _SXXEYY_RE.sub(" ", s)
+    s = _YEAR_RE.sub(" ", s)
+    s = _RELEASE_JUNK_RE.sub(" ", s)
+    s = re.sub(r"[\[\](){}]", " ", s)
+    s = re.sub(r"-\s*[A-Za-z0-9]+\s*$", " ", s)  # trailing "-GROUP" release tag
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _parse_spoken_episode(name: str) -> Optional[Tuple[str, int, int]]:
+    """Returns (title, season, episode) for "<title> season X episode Y" (or the
+    glued "s1e1" short form), else None if the spoken name doesn't look like a
+    TV episode request at all (a plain movie title)."""
+    m = _SEASON_EPISODE_WORDS_RE.match(_words_to_digits(name).strip())
+    if not m:
+        return None
+    title = m.group(1).strip()
+    return title, int(m.group(2)), int(m.group(3))
+
+
 def _find_video_file(name: str, location: Optional[str] = None) -> Optional[Path]:
-    target_stem = name.strip().rstrip(".,!?;: ").lower()
+    raw_name = name.strip().rstrip(".,!?;: ")
 
     if location:
         base = _resolve_location(location)
@@ -543,18 +605,40 @@ def _find_video_file(name: str, location: Optional[str] = None) -> Optional[Path
     else:
         search_dirs = [d for k in _DEFAULT_VIDEO_SEARCH_LOCATIONS if (d := _NAMED_LOCATIONS[k]()).exists()]
 
+    candidates: List[Path] = [
+        f
+        for directory in search_dirs if directory.exists()
+        for f in directory.iterdir()
+        if f.is_file() and f.suffix.lower() in VIDEO_EXTENSIONS
+    ]
+
+    episode = _parse_spoken_episode(raw_name)
+    if episode is not None:
+        title, season, ep = episode
+        tag_pattern = re.compile(rf"s0*{season}e0*{ep}\b", re.IGNORECASE)
+        tagged_matches = [f for f in candidates if tag_pattern.search(f.stem)]
+        if len(tagged_matches) == 1:
+            return tagged_matches[0]
+        if len(tagged_matches) > 1:
+            # Multiple files share this season/episode tag (different shows in
+            # the same folder, or duplicate quality copies) -- narrow by title.
+            candidates = tagged_matches
+        target = title or raw_name
+    else:
+        target = raw_name
+
+    target_lower = target.lower()
     best: Optional[Path] = None
-    for directory in search_dirs:
-        if not directory.exists():
-            continue
-        for f in directory.iterdir():
-            if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS:
-                continue
-            if f.stem.lower() == target_stem:
-                return f  # exact match -- stop looking immediately
-            if best is None and target_stem in f.stem.lower():
-                best = f
-    return best
+    best_score = 0
+    for f in candidates:
+        stem_lower = f.stem.lower()
+        if stem_lower == target_lower or (target_lower and target_lower in stem_lower):
+            return f  # exact/substring match -- stop looking immediately
+        score = fuzz.token_sort_ratio(target_lower, _clean_title(f.stem).lower())
+        if score > best_score:
+            best, best_score = f, score
+
+    return best if best_score >= VIDEO_MATCH_THRESHOLD else None
 
 
 def play_video(name: str, location: Optional[str] = None) -> str:

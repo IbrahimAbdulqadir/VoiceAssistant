@@ -94,11 +94,17 @@ TOOLS = [
     {
         "type": "function",
         "name": "play_video",
-        "description": "Find a video file by name and play it in VLC. Searches Videos, Downloads, Desktop, Documents, and home if no location is given.",
+        "description": (
+            "Find a video file by title and play it in VLC. Searches Videos, Downloads, "
+            "Desktop, Documents, and home if no location is given. Matches against the "
+            "actual scene-release filename (e.g. 'Gotham.S01E01.1080p.WEB.x264-GROUP.mkv') "
+            "by fuzzy title, so pass just the plain title spoken, e.g. name='gotham season 1 "
+            "episode 1' or name='the batman' -- never try to reconstruct the exact filename."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Video file name (extension optional)"},
+                "name": {"type": "string", "description": "Spoken title, optionally with 'season X episode Y'"},
                 "location": {"type": "string", "description": "Optional named location or full path to search"},
             },
             "required": ["name"],

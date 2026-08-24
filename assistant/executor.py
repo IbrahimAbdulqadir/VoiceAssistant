@@ -32,6 +32,8 @@ HELP_TEXT = """Commands:
   create folder <name> in <location> - create a folder (e.g. "create a folder called spiderman in downloads")
   create file <name> in <location> - create a file (e.g. "create a file called notes in downloads")
   play <video> on vlc [from <location>] - find and play a video file in VLC
+                                 (matches by title, e.g. "play gotham season 1
+                                 episode 1 on vlc" -- no need to read the filename)
   show desktop                 - toggle show-desktop (minimize/restore all windows)
   open notifications           - open the notification center
   open search                  - open Windows search

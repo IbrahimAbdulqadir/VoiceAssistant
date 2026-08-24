@@ -75,6 +75,40 @@ class TestCreateFile(unittest.TestCase):
             actions.create_file("not-a-real-location-xyz", "notes")
 
 
+class TestVideoTitleExtraction(unittest.TestCase):
+    def test_cleans_scene_release_junk(self):
+        self.assertEqual(actions._clean_title("Gotham.S01E01.1080p.WEB.x264-GROUP"), "Gotham")
+        self.assertEqual(
+            actions._clean_title("The.Batman.2022.1080p.BluRay.x264-SPARKS"), "The Batman"
+        )
+        self.assertEqual(
+            actions._clean_title("Interstellar (2014) [1080p] BluRay x265 HEVC"), "Interstellar"
+        )
+
+    def test_parses_spoken_season_episode(self):
+        self.assertEqual(actions._parse_spoken_episode("gotham season 1 episode 1"), ("gotham", 1, 1))
+        self.assertEqual(
+            actions._parse_spoken_episode("gotham season one episode one"), ("gotham", 1, 1)
+        )
+        self.assertEqual(actions._parse_spoken_episode("breaking bad s5e14"), ("breaking bad", 5, 14))
+
+    def test_plain_title_is_not_an_episode_request(self):
+        self.assertIsNone(actions._parse_spoken_episode("the batman"))
+
+    def test_find_video_file_matches_by_season_episode_tag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "Gotham.S01E01.1080p.WEB.x264-GROUP.mkv").touch()
+            (Path(tmp) / "Gotham.S01E02.1080p.WEB.x264-GROUP.mkv").touch()
+            result = actions._find_video_file("gotham season 1 episode 2", location=tmp)
+            self.assertEqual(result.name, "Gotham.S01E02.1080p.WEB.x264-GROUP.mkv")
+
+    def test_find_video_file_matches_movie_title_fuzzily(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "The.Batman.2022.1080p.BluRay.x264-SPARKS.mkv").touch()
+            result = actions._find_video_file("the batman", location=tmp)
+            self.assertEqual(result.name, "The.Batman.2022.1080p.BluRay.x264-SPARKS.mkv")
+
+
 class TestPlayVideo(unittest.TestCase):
     @patch("assistant.actions.resolve_app_path")
     def test_no_matching_video_refused(self, mock_resolve):

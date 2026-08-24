@@ -2,6 +2,59 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-24, even later still) — real title matching for `play_video`
+
+Immediately after `play_video` shipped (see section right below), the user
+pointed out it shouldn't require reading out the whole scene-release
+filename (e.g. `Gotham.S01E01.1080p.WEB.x264-GROUP.mkv`) -- it should learn
+to extract the real title (and season/episode, for TV) the way a person
+would say it, so "gotham season 1 episode 1" or just "the batman" is enough.
+
+- **`assistant/actions.py`**: `_find_video_file` no longer only does exact/
+  substring matching against the raw filename. New pieces:
+  - `_clean_title(raw)` -- strips season/episode tags, year, and scene-release
+    junk (resolution, source, codec, release group) from a filename stem down
+    to just the show/movie title, normalizing dots/underscores to spaces.
+    Verified: `"Gotham.S01E01.1080p.WEB.x264-GROUP"` -> `"Gotham"`,
+    `"The.Batman.2022.1080p.BluRay.x264-SPARKS"` -> `"The Batman"`.
+  - `_parse_spoken_episode(name)` -- recognizes "<title> season X episode Y"
+    (also the glued short form "s1e1"), returning `(title, season, episode)`
+    or `None` if the spoken name isn't a TV-episode-shaped request at all (a
+    plain movie title correctly returns `None`). Also normalizes small spoken
+    number words ("season one episode one") to digits first via
+    `_words_to_digits`, since Whisper doesn't reliably write those as digits
+    on its own.
+  - `_find_video_file` now: if the spoken name parses as season/episode,
+    matches files by an `SxxEyy`-style regex tag first (narrowing by fuzzy
+    title if more than one file shares that tag, e.g. two different shows in
+    the same folder); otherwise falls back to fuzzy-matching the spoken title
+    against every candidate's `_clean_title()` (`rapidfuzz.fuzz.token_sort_ratio`,
+    threshold `VIDEO_MATCH_THRESHOLD = 70`) after the existing exact/substring
+    check still gets first try for speed.
+  - Verified end-to-end against real temp files matching actual scene-release
+    naming: "gotham season 1 episode 1"/"...season one episode two" both
+    correctly picked their exact `SxxEyy`-tagged file out of two candidates;
+    "the batman" and bare "batman" both correctly matched
+    `The.Batman.2022.1080p.BluRay.x264-SPARKS.mkv`.
+- New tests in `tests/test_actions.py`: `TestVideoTitleExtraction` (junk
+  stripping, spoken season/episode parsing incl. word-numbers, plain-title
+  non-match, and two `_find_video_file` end-to-end cases against realistic
+  filenames). 30 tests total, all passing.
+- Updated `play_video`'s LLM tool description (`llm_backend.py`) and the CLI
+  help text (`executor.py`) to make clear it matches by title, not filename
+  -- matters for the LLM fallback path especially, so it doesn't try to
+  reconstruct an exact filename itself.
+- **Checked against this user's actual video library and confirmed a real
+  gap, not yet fixed**: everything currently in `Videos` is screen recordings
+  in a `Screen Recordings` subfolder, not movies/shows directly in `Videos` --
+  so the pre-existing "only searches one level deep, not subfolders"
+  limitation (see section below) is the thing that will actually block this
+  feature working today for this user, more than title-matching was. Revisit
+  making the search recursive once there's real downloaded content to test
+  against.
+- Listener restarted and confirmed live with this change; all tests still
+  passing.
+
 ## Follow-up session (2026-08-24, even later) — VLC video playback + create-file bug
 
 User asked for a "play a video on VLC" command, and reported "create a file"
