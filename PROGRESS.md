@@ -2,6 +2,318 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-24) — spoken feedback + folder creation
+
+Tackled the first two items off the NEXT AGENDA below, in the priority order the
+user asked for: audio feedback first (folded in a new complaint that arrived
+this session — the assistant needed to say when it *doesn't* understand or
+*can't* carry out a command, not just confirm success), then folder creation.
+Power actions (shutdown/restart/hibernate) and "refresh system" were
+deliberately **not** touched this session — the user only asked to solve audio
++ folder creation "right now"; power actions still needs the safety design
+called out below, and refresh-system still needs a clarifying answer from the
+user before building anything.
+
+- **Spoken feedback (`assistant/tts.py`, new)** — the assistant now speaks a
+  short response after every voice command instead of only printing/logging
+  it, using `pyttsx3` (offline Windows SAPI5, no account/API key, consistent
+  with the rest of the project running fully local). Three response
+  categories, each with a few randomly-varied phrasings addressing the user by
+  name (`ASSISTANT_USER_NAME` env var, defaults to "Ibrahim"):
+  - **Success** — "Done." / "Done, Ibrahim." / "Got it." (this was also the
+    "audio done confirmation" deferred earlier in the session below — now
+    done).
+  - **Didn't understand** (no intent matched and the LLM fallback didn't
+    resolve it either, or nothing was transcribed at all) — "I don't
+    understand, Ibrahim." / "Sorry Ibrahim, I didn't catch that. Can you speak
+    a little clearer?" / "I'm not sure what you mean, Ibrahim." — this is the
+    exact scenario the user flagged this session: previously a failed/unclear
+    command just sat silently in the log with no signal at all that anything
+    had gone wrong.
+  - **Understood but couldn't do it** (app not found, nothing running to
+    close, bad path, script not whitelisted, etc.) — "I can't carry that out,
+    Ibrahim." / "Sorry Ibrahim, I wasn't able to do that." / "That didn't
+    work, Ibrahim."
+  - New env vars, all optional (see `config/.env.example`): `SPEAK_RESPONSES`
+    (set `0` to disable), `ASSISTANT_USER_NAME`, `TTS_RATE`.
+  - Only wired into the voice path (`assistant/listen.py`) — the typed CLI
+    (`assistant/cli.py`) deliberately doesn't speak, since audio feedback is
+    for a hands-off voice session and the CLI already shows the same text on
+    screen.
+- **The real problem this required fixing first**: `executor.execute()`
+  collapsed every outcome — genuine success, "didn't understand", and
+  "understood but failed" — into one plain string, with no way for a caller to
+  tell them apart. That's fine for the CLI/log (a human reads the sentence),
+  but it meant the voice front-end had no reliable signal to decide *which*
+  spoken response to give. Fixed with two changes:
+  1. New `actions.ActionError` exception — every action function's genuine
+     failure path (`open_app`, `close_app`, `minimize_app`, `open_vscode`,
+     `run_script`, `open_folder`) now `raise`s this instead of `return`ing the
+     failure message as if it were a normal result. A plain `return` from an
+     action function now always means "succeeded" (even a purely informational
+     one, like "no battery on this machine" or "already open, switching to
+     it") — only a genuine miss raises.
+  2. New `executor.ExecStatus` enum (`OK` / `NO_MATCH` / `FAILED`) and
+     `executor.execute_with_status(text)`, which returns `(status, message)`.
+     `executor.execute(text)` (the original string-returning function, still
+     used by `cli.py` and the test suite unchanged) is now a thin wrapper over
+     it. `listen.py` calls `execute_with_status` directly and picks the
+     spoken response off `status`.
+  - Updated `tests/test_actions.py`'s three failure-path tests
+    (`test_protected_process_refused`, `test_no_match`,
+    `test_unwhitelisted_script_refused`) to `assertRaises(ActionError)`
+    instead of asserting on a returned string — the old assertions no longer
+    matched the new contract. Full suite (19 tests) passes.
+- **Folder creation (`actions.create_folder(location, name)`, new)** — handles
+  the exact example the user gave: "create a new folder in downloads, name it
+  spiderman." Two intent patterns in `executor.py` cover both natural
+  orderings ("create a folder called X in Y" and "create a new folder in Y,
+  name it X"; the location-first pattern is registered first since its " in "
+  would otherwise also match the name-first pattern's shape with the groups
+  swapped wrong — verified both route correctly with no cross-matching).
+  - New `actions._NAMED_LOCATIONS` / `_resolve_location()` resolves common
+    named locations (downloads, documents, desktop, pictures, music, videos,
+    home) straight to the real filesystem path via `Path.home()` — these are
+    *not* the same as the `shell:`-namespace aliases already in
+    `config/apps.yaml` (those only work for launching Explorer at a virtual
+    folder, not for creating a real file inside one). Falls back to treating
+    the location as a literal path (with the same `%USERNAME%`-style
+    env-var expansion `open_folder` already got) if it isn't a named one.
+  - Also exposed as an `create_folder` tool to the Phase 4 LLM fallback
+    (`llm_backend.py`) so oddly-phrased folder requests still work.
+  - Verified end-to-end: both phrasings create the folder and return
+    `ExecStatus.OK`; a real "create a new folder in downloads, name it
+    spiderman_test_delete_me" was run against the actual Downloads folder,
+    confirmed on disk, then cleaned up.
+- **`requirements.txt`**: added `pyttsx3` (pulls in `comtypes`/`pypiwin32`;
+  `pywin32` was already a dependency). Installed and confirmed working with a
+  real spoken test on this machine.
+- **Listener restarted and confirmed live** with all of this session's changes
+  — spoken feedback, folder creation, and the fast-lane models from
+  `batch_train_words3.log`. Two real gotchas hit along the way, worth knowing
+  about next time:
+  1. **Killing the listener from the agent's own shell tool silently no-op's**
+     — `Stop-Process`/`taskkill` against the scheduled task's PID report
+     success but the process's actual start time never changes. This is a
+     sandboxing limitation specific to the agent's Bash/PowerShell tool
+     (same user, same session ID, so not a permissions issue) — it can kill a
+     process it spawned itself (e.g. one started via `run_in_background`), just
+     not the Task-Scheduler-launched listener. **The user has to run
+     `Stop-Process`/`Start-ScheduledTask` themselves** from their own terminal;
+     the agent can't do this part.
+  2. **After the user did kill the old process, `Start-ScheduledTask` then
+     failed** with error `0x800710E0` ("the operator or administrator has
+     refused the request"). Cause: Task Scheduler's own internal bookkeeping
+     (`schtasks /query` showed `Status: Running`) hadn't noticed the process
+     was gone, and `MultipleInstances = IgnoreNew` refuses to start a new one
+     while it still thinks one's active. **Fix: `Stop-ScheduledTask
+     -TaskName "VoiceAssistantListener"` first** (tells Task Scheduler itself
+     to clear its tracked instance) **then** `Start-ScheduledTask`. Worth
+     trying this first if a future restart ever gets refused the same way.
+  3. **Then it looked hung** (only reached `~0.03s` of CPU time after several
+     minutes, one thread instead of the expected two) but wasn't — a parallel
+     foreground run (`python main.py --listen`, not `pythonw.exe` via the
+     task, so its output was actually visible) confirmed it was just genuinely
+     slow to load this one time (~7 minutes end to end vs. the usual 1-2),
+     not deadlocked — CPU time was climbing, just very slowly. No code change
+     needed; if this happens again, checking whether CPU time is climbing at
+     all (even slowly) over a couple of checks a minute apart is the way to
+     tell "slow" from "actually stuck" before assuming something's broken.
+     (The foreground diagnostic process was killed afterward once confirmed
+     — running two listener instances at once would have fought over the
+     microphone.)
+  - Confirmed via `logs/assistant.log`: `Loaded 16 fast-lane command word
+    models: ['battery', 'chess', 'chrome', 'close', 'day_one', 'desktop',
+    'minimize', 'next', 'notifications', 'open', 'pause', 'play', 'previous',
+    'search', 'spotify', 'wifi']` followed by `Wake word listener started`.
+- **Fast-lane rollout status, checked while here (not otherwise touched this
+  session)**: `batch_train_words3.ps1` finished (stale log, no process still
+  running). Deployed to `config/command_words/`: `battery`, `chess`,
+  `chrome`, `close`, `day_one`, `desktop`, `minimize`, `next`, `notifications`,
+  `open`, `pause`, `play`, `previous`, `search`, `spotify`, `wifi`. Missing
+  (never got a model): `telegram`, `vscode`, `notepad`, `vm`,
+  `file_explorer`, `terminal`, `unigram` — `unigram` failed outright (every
+  OpenAI TTS generation attempt hit "Connection error", so it had 0 positive
+  samples to train on); the rest simply weren't in this particular batch run
+  or need investigation. Left `TARGET_WORDS` in `listen.py` as-is (already
+  lists all of these) — harmless per the existing comment there, since
+  `_load_wake_model()` only scores words it actually finds a `.onnx` file for.
+
+## Follow-up session (2026-08-23, later) — real bugs found and fixed
+
+After the fast-lane rollout below got resumed, the user reported several things
+broken after a full system power-off/restart: minimize "lost its skill", the
+on-screen indicator icon didn't appear at all, apps still duplicate-opened
+instead of focusing the existing window, and close kept refusing to work. All
+four were investigated against `logs/assistant.log` rather than guessed at,
+and turned out to be real pre-existing architectural gaps, not training
+issues and not new regressions from this session's own changes (confirmed:
+`Minimized chrome.`/`Minimized code.`/`Closed: Telegram.exe.` all worked fine
+in the very same log window where chess/vscode were failing) --
+
+- **Root cause (`assistant/actions.py`)**: `close_app`/`minimize_app`, and
+  `open_app`'s own "already open, focus it instead of duplicating" dedupe
+  check, all matched a running process by the **literal spoken/alias name**
+  (e.g. "vscode", "chess") -- never by resolving through
+  `resolver.resolve_app_path` the way `open_app`'s *launch* path already did.
+  That breaks in two different ways:
+  - **Normal apps whose alias doesn't equal their real process name** -- e.g.
+    "vscode" is an alias for the bare command "code", but the actual running
+    process is `Code.exe`; matching literally on "vscode" never finds it, so
+    `close vscode`/`minimize vscode` always failed ("No running process
+    matching 'vscode'") even though `open vscode` worked fine. This was
+    real and present since 2026-08-22, unrelated to any fast-lane work.
+  - **Apps with no process name of their own at all** -- Chrome PWAs (chess,
+    unigram, whatsapp web) all run as `chrome.exe`/`chrome_proxy.exe`, shared
+    with the entire browser. There is no safe process-name match here: matching
+    literally on "chess" finds nothing (hence "No running process matching
+    'chess'" no matter how many times you asked), and matching loosely on
+    "chrome" would be actively dangerous -- it'd close/minimize *every* Chrome
+    window and tab, not just the PWA.
+  - This combination is also what looked like "duplicate app opening": since
+    the dedupe check couldn't recognize chess as already running either, every
+    repeated "open chess" (after "close chess" kept silently failing) may have
+    kept happening without ever being recognized as a repeat.
+- **Fix, two parts**:
+  1. New `_process_name_candidates(name)` in `actions.py`: resolves the name
+     through `resolve_app_path` (same as `open_app` already did for itself),
+     and if the resolved target is a bare command rather than a path (e.g.
+     "code"), follows it through `shutil.which()` to recover the real launcher
+     file and its stem -- this is what makes `vscode` → `code` → `Code.exe`
+     resolve correctly without hardcoding a per-app exception. `close_app`,
+     `minimize_app`, and `open_app`'s dedupe check all use this now instead of
+     matching the raw literal name.
+  2. New `_hwnds_for_title(substring)`: a window-title-based fallback (not
+     process-based) used only when process-name matching finds nothing --
+     this is what correctly handles Chrome PWAs. `minimize_app` uses it to
+     find the window to minimize; `close_app` uses it too, but sends `WM_CLOSE`
+     to just that window (`win32gui.PostMessage`) instead of killing a shared
+     process, so it can never take down other Chrome windows/tabs by mistake;
+     `open_app`'s dedupe check uses it to correctly recognize an already-open
+     PWA and focus it instead of opening a duplicate.
+  - Verified against the log post-restart: `minimize vscode` → `Minimized
+    vscode.` (previously always failed).
+- **Indicator icon missing after a full power-off/restart**: found a real,
+  previously-silent failure mode in `assistant/listen.py`'s `run()` --
+  `indicator.run()` (Tkinter's mainloop) was called unguarded on the main
+  thread, with the audio/wake-word loop on a **daemon** thread. If `tk.Tk()`
+  ever raises (plausible right at a fresh boot, since the Task Scheduler "at
+  log on" trigger can fire before Windows has finished detecting monitors/the
+  desktop has fully settled), that exception would propagate up, the process
+  would exit, and the daemon audio thread would die with it -- silently
+  killing the *entire* assistant, not just the indicator, with zero trace in
+  the log (which is why nothing pointed at this until the code was actually
+  read). Fixed three ways:
+  1. `indicator.run()` is now wrapped in try/except in `listen.py`; a failure
+     is logged (`log.exception(...)`) and falls back to `thread.join()` so
+     voice commands keep working even if the indicator itself can't start.
+  2. `indicator.py`'s `run()` now sleeps 3s before creating the Tk window (head
+     start for display/monitor detection to settle) and logs the computed
+     window position + detected screen size on every start
+     (`assistant.indicator: Indicator window placed at (x, y) on a WxH
+     screen`) -- confirmed working post-restart: `(1270, 24) on a 1366x768
+     screen`, correctly on-screen. If it goes missing again, that log line is
+     now the first thing to check (was previously silent either way).
+  3. Added a 20-second `Delay` to the `VoiceAssistantListener` scheduled
+     task's "at log on" trigger (`Set-ScheduledTask`/`MSFT_TaskLogonTrigger`),
+     as extra insurance against the same early-boot race independent of the
+     code fix. (Confirmed the task's `LogonType` is already `Interactive`, not
+     a Session-0-isolated "whether user is logged on or not" task, so that
+     more common Task Scheduler GUI gotcha was ruled out first.)
+  - Not fully proven root-caused (no direct log evidence existed *before*
+    this session's logging was added, by definition), but this closes the one
+    concrete silent-failure path found by reading the code, and next
+    occurrence will now be diagnosable from the log instead of a total mystery.
+- **"Open recycle bin" didn't work either** ("Couldn't find an app matching
+  'recycle bin'", confirmed in the log) -- same root category of bug as
+  above, but at the discovery level instead of the process-matching level:
+  Recycle Bin (like This PC, Downloads, Documents, Network) is a *virtual*
+  Windows shell folder with no real `.exe` and no Start Menu `.lnk`, so
+  `app_discovery.py` can never find it no matter how good its scanning gets.
+  Fixed by adding explicit `config/apps.yaml` aliases that launch them via
+  their `shell:` namespace path (e.g. `explorer.exe shell:RecycleBinFolder`)
+  -- added `recycle bin`/`bin`, `this pc`/`my computer`, `downloads`,
+  `documents` this way. The same pattern (an `explorer.exe shell:<Name>`
+  alias) is the fix for any other special shell folder that comes up later.
+- **`open_folder` didn't expand `%USERNAME%`-style env-var placeholders** --
+  found while chasing an unrelated "take me to desktop" attempt: Whisper
+  mis-transcribed it as "Pick me to desktop" (the exact phrase *is* already a
+  recognized intent in `executor.py`, matching `take me to|go to|show
+  (the )?desktop` -- this was a transcription-accuracy miss, not a missing
+  feature), which fell through to the LLM fallback, which guessed
+  `open_folder("C:\Users\%USERNAME%\Desktop")` -- a placeholder it can't
+  know the real value of. `open_folder` only called `.expanduser()` (handles
+  a leading `~`), not `os.path.expandvars()`; fixed by adding that too.
+- **Deferred, user's own call**: an audio/TTS "done" confirmation after
+  executing a command -- explicitly requested but the user said "we will do
+  that later", so intentionally not implemented this session.
+
+## NEXT AGENDA -- attend to this first next session
+
+The user was explicit that this is what gets picked up first, before anything
+else, next time. In their own words: "I don't want to come back and have to
+say it should be able to do this again." Everything below is a **capability
+gap** (a real, missing feature), not a bug in something that already exists --
+distinct from everything fixed above.
+
+**Items 2 (folder creation) and 4 (audio confirmation, expanded to also cover
+failure/didn't-understand feedback) are done** as of the 2026-08-24 session
+above — kept in numbering below for reference to the original request, but
+see that section for what shipped. **Items 1 (power actions) and 3 (refresh
+system) are still outstanding** and still need the safety design / clarifying
+question called out below before building, not a guess.
+
+**Standing preference driving all of this** (said directly, applies beyond
+just this list): the user does not want the assistant's capabilities to grow
+primarily through one-off voice-model training for individual command words.
+Training a fast-lane word only ever makes speech *recognition* instant for
+that one word -- it does nothing to build the underlying capability itself.
+Anything that's really a normal OS/system action (power state, file/folder
+management, standard Windows locations) should be built as a real, general
+`actions.py` function first, the same way `open_app`/`close_app`/`show_desktop`
+already are -- fast-lane training is an optional speed layer on top of a
+capability that already exists via the normal Whisper+regex/LLM path, never
+the thing that makes the capability exist in the first place.
+
+1. **System power actions -- shutdown / restart / hibernate.** Don't exist in
+   `actions.py` at all right now. The user's bar for these: saying the
+   command should be enough that "all I need to do is just click OK" --
+   i.e. it should actually trigger the real Windows action (`shutdown /s
+   /t 0`, `shutdown /r /t 0`, `shutdown /h`), not just open the Settings
+   power menu and stop there. Needs real thought on safety before
+   building, not just wiring it up:
+   - These are destructive/hard-to-reverse (unsaved work lost) in a way
+     open/close/minimize aren't -- probably want a short cancellable delay
+     (`shutdown /t 30` + a spoken/logged "say cancel to stop it" window,
+     or at minimum route through VOICE_MODE-style confirmation the same
+     way `close_app` already does for destructive actions) rather than
+     firing instantly and irreversibly on a single mis-transcription.
+   - Should land as new `actions.shutdown_system()` /
+     `actions.restart_system()` / `actions.hibernate_system()`, wired into
+     `executor.py` intents, not just a `run_script` whitelist entry --
+     this is core functionality, not a user script.
+2. **Folder/file creation and general file management.** Concrete example
+   the user gave: "create a new folder in downloads, name it spiderman."
+   Nothing like this exists yet -- `actions.py` can only *open* an existing
+   folder (`open_folder`), never create/rename/move one. Needs a new
+   `actions.create_folder(location, name)` at minimum (with the same
+   `%USERNAME%`/env-var expansion fix as `open_folder` just got), a new
+   executor intent/regex for "create a folder called X in Y", and probably
+   `open_wifi_settings`/`downloads`-style named-location resolution (reuse
+   the `shell:` alias work above) so "in downloads" resolves the same way
+   voice already resolves app names. Whether to extend this further (rename,
+   move, delete a file/folder by voice) is worth a real design conversation
+   given the blast radius of "delete" specifically -- start with create only.
+3. **"Refresh system"** -- requested but ambiguous; needs a clarifying
+   question with the user before building anything, not a guess. Candidate
+   interpretations to raise: (a) refresh the desktop/Explorer view (the F5
+   equivalent -- `ie4uinit.exe -show` or restarting `explorer.exe`), (b)
+   force `app_discovery.discover_apps(force=True)` to re-scan newly
+   installed apps without a full listener restart, (c) something else
+   entirely. Don't build against a guess here.
+4. **Audio "done" confirmation** (carried over from earlier this session,
+   still explicitly deferred by the user, not forgotten -- see above).
+
 ## Where things stand right now (end of session)
 
 The project is now a git repo pushed to
@@ -22,6 +334,12 @@ listener has **not yet been restarted** to actually load the ones already
 trained. Check `wakeword_trainer/batch_train_words2.log` for how far it got
 (it's a detached OS process, so it kept running after the session ended)
 before doing anything else with the fast lane.
+
+**Update**: as of the 2026-08-24 session, the listener has been restarted and
+all of the above (spoken feedback, folder creation, all trained fast-lane
+models) is confirmed live — see that section above for the restart gotchas
+hit along the way (Task Scheduler stale-state refusal, and a one-off slow
+~7-minute load that looked hung but wasn't).
 
 To manually restart it after a config/code change:
 ```powershell
@@ -175,42 +493,79 @@ VoiceAssistant repo):
   can be automated. Re-run `train_command_word.py <word>` afterward to
   retrain including the new real samples (TTS generation step skips files
   that already exist, so it's cheap).
-- **Batch rollout status at session end**: a batch script
-  (`wakeword_trainer/batch_train_words.ps1`, running via a **detached**
-  `Start-Process` so it survives past any single tool call/session) was
-  training the full word list in sequence. ⚠️ **Caution for next time**: at
-  one point during this session, the same batch got launched twice
-  concurrently by accident (once as a backgrounded tool call, then again via
-  Start-Process without killing the first) -- this caused a real failure (a
-  directory-junction race on "close"). Always verify no earlier instance of
-  a long-running background job is still alive (`Get-CimInstance Win32_Process`
-  filtered on the script/command name) before relaunching one.
-  - Done and deployed: `open` (F1 0.86), `close` (F1 0.95), `minimize`,
-    `pause`, `next`. Check `wakeword_trainer/batch_train_words2.log` for
-    anything that finished after the session ended.
-  - Failed and needs a manual retry: `play` (a transient "Connection error"
-    from the OpenAI TTS API killed all 30 attempts in one go -- not a real
-    bug, just retry `python train_command_word.py "play"`).
-  - Still queued in the batch: `previous`, `desktop`, `wifi`,
-    `notifications`, `search`, `battery`, `spotify`, `chrome`, `telegram`,
-    `vscode`, `notepad`.
-  - **Not in the batch at all, but the user already recorded real voice
-    samples for them** (found in `data_words/chess/positive/` and
-    `data_words/day_one/positive/`, 15 real takes each) -- these need
-    `python train_command_word.py "chess"` and `"day_one"` run manually, then
-    added to `TARGET_WORDS` in `listen.py`. "day_one" is presumably the Day
-    One journaling app; "chess" wasn't otherwise discussed.
+- **Batch rollout status, updated in the follow-up session (2026-08-23)**:
+  the original batch (`batch_train_words.ps1` / `batch_train_words2.log`)
+  had actually **died silently** right as it started `previous` -- confirmed
+  by checking for a live process (none found) and the log's real mtime
+  (2026-08-22 18:52, over a day stale despite the file being read as
+  "recent" at first glance -- always check `stat`'s *Modify* time, not
+  *Access* time, which updates just from reading/grepping the file).
+  ⚠️ **Caution for next time** (carried over): verify no earlier instance of
+  a long-running background job is still alive (`Get-CimInstance
+  Win32_Process` filtered on the script/command name) before relaunching one
+  -- a prior session double-launched the batch by accident and caused a
+  directory-junction race.
+  - Done and deployed before the stall: `open` (F1 0.86), `close` (F1 0.95),
+    `minimize`, `pause`, `next`.
+  - Failed before the stall: `play` (transient OpenAI TTS "Connection error").
+  - **New combined batch launched** (`wakeword_trainer/batch_train_words3.ps1`,
+    detached via `Start-Process`, log at
+    `wakeword_trainer/batch_train_words3.log`) covers: retry `play`, resume
+    the original queue (`previous`, `desktop`, `wifi`, `notifications`,
+    `search`, `battery`, `spotify`, `chrome`, `telegram`, `vscode`,
+    `notepad`), plus new target words the user picked after reviewing a full
+    installed-apps dump: `chess`, `day one` (extra phrase none, real voice
+    samples already existed in `data_words/day_one/positive/`), `vm` (extra
+    phrases "virtual machine", "virtualbox"), `file explorer`, `terminal`,
+    `unigram`. Check `batch_train_words3.log` for how far it got.
+  - **Real app-mapping bugs found and fixed while picking those new words**
+    (in `config/apps.yaml`, not just training data):
+    - `assistant/app_discovery.py` only captures a Start Menu shortcut's
+      *target path*, not its *arguments*. Chess ("Chess - Play & Learn"),
+      Unigram, and WhatsApp Web are all installed as Chrome PWAs and share
+      the exact same target, `chrome_proxy.exe` -- they're only
+      distinguished by a `--app-id=...` argument that discovery silently
+      drops. Without a fix, "open chess" would have launched bare
+      `chrome_proxy.exe` with no arguments and done nothing useful. Fixed by
+      adding explicit `chess`/`unigram`/`whatsapp web` aliases in
+      `apps.yaml` with the full command (path + `--profile-directory` +
+      `--app-id`, read directly off each `.lnk`'s `Arguments` property via
+      `WScript.Shell`). This same blind spot likely affects any other
+      Chrome-PWA-installed app on this machine, not just these three.
+    - Day One has **no** Start Menu `.lnk` and no WindowsApps execution-alias
+      stub at all (it's an MSIX/Store app), so discovery can't find it by
+      any name. Fixed by aliasing `day one` / `day_one` to its AppsFolder
+      shell path (`explorer.exe
+      shell:AppsFolder\22490Automattic.DayOneJournalPrivateDiary_9h07f78gwnchp!DayOne`
+      -- PackageFamilyName + AppId pulled via
+      `Get-AppxPackage`/`Get-AppxPackageManifest`).
+    - `vm` and `file_explorer` added as aliases pointing at the existing
+      `oracle virtualbox` / `explorer` targets, since a bare "vm" doesn't
+      fuzzy-match "oracle virtualbox" and the fast-lane word key
+      (`file_explorer`, underscored -- `train_command_word.py`'s
+      `safe_name()`) didn't match the pre-existing `file explorer` alias
+      (space).
+  - `TARGET_WORDS` in `listen.py` updated to include `chess`, `day_one`,
+    `vm`, `file_explorer`, `terminal`, `unigram` (in addition to the
+    existing `spotify`, `chrome`, `telegram`, `vscode`, `notepad`) --
+    harmless to add before training finishes, since `_load_wake_model()`
+    only scores words it actually finds `.onnx` files for.
   - `spotify` already has 15 real voice takes recorded too, sitting in
-    `data_words/spotify/positive/` waiting for the batch to reach it (or a
-    manual re-run) -- these get included automatically since
+    `data_words/spotify/positive/` -- picked up automatically since
     `train_command_word.py` only regenerates TTS files that don't already
     exist and picks up everything else in the positive dir.
-- **The listener has not been restarted since deploying any of these
+- **The listener has still not been restarted since deploying any of these
   models** -- `_load_wake_model()` only picks up `config/command_words/*.onnx`
   at startup, so none of the fast lane is actually live yet even though
   several models are already deployed there. Restart the
-  `VoiceAssistantListener` scheduled task once the rollout is far enough
-  along to be worth testing.
+  `VoiceAssistantListener` scheduled task once `batch_train_words3.ps1`
+  finishes (or far enough along to be worth testing).
+- **Also still true from before**: the user has a full 132-entry
+  installed-apps dump (Start Menu + WindowsApps discovery) available if more
+  fast-lane target words get picked later -- see chat history rather than
+  re-running discovery from scratch, most of it is Windows-internals clutter
+  already filtered out (uninstallers, `.msc` snap-ins, help/manual files,
+  MSIX stub aliases).
 
 ## Performance tuning done this session
 

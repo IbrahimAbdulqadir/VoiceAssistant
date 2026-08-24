@@ -29,6 +29,16 @@ log = get_logger(__name__)
 
 ConfirmFn = Callable[[str], bool]
 
+
+class ActionError(Exception):
+    """Raised by an action that was understood but genuinely couldn't be carried
+    out (app not found, nothing running to close, bad path, etc.) -- as opposed
+    to a plain return, which always means the action succeeded (even if the
+    success is just informational, like "no battery on this machine"). executor.py
+    catches this to tell "understood but failed" apart from "succeeded" so the
+    voice front-end (assistant/tts.py) can give an honest spoken response instead
+    of always saying "done"."""
+
 # Set True by listen.py once at startup -- a voice session has no stdin for
 # answering a typed y/N prompt, so close/run-script confirmation is skipped there.
 # Speaker verification (Phase 3) is the real gate on who can issue a command at all.
@@ -66,6 +76,27 @@ def _visible_windows_for_pids(pids: Set[int]) -> List[int]:
     return hwnds
 
 
+def _hwnds_for_title(substring: str) -> List[int]:
+    """Fallback for apps with no process name of their own to match -- e.g. Chrome
+    PWAs (chess, unigram, whatsapp web) all run as chrome.exe/chrome_proxy.exe,
+    shared with the entire browser, so matching by process name either finds
+    nothing or -- if matched loosely against "chrome" -- would wrongly catch
+    every ordinary browser window too. Matching by window title instead finds
+    just that app's own window."""
+    substring_lower = substring.strip().rstrip(".,!?;: ").lower()
+    hwnds: List[int] = []
+
+    def _enum_handler(hwnd, _):
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+        title = win32gui.GetWindowText(hwnd)
+        if title and substring_lower in title.lower():
+            hwnds.append(hwnd)
+
+    win32gui.EnumWindows(_enum_handler, None)
+    return hwnds
+
+
 def _focus_window(hwnd: int) -> None:
     if win32gui.IsIconic(hwnd):
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
@@ -83,24 +114,57 @@ def _focus_window(hwnd: int) -> None:
             log.debug("Could not force foreground for window: %s", e)
 
 
+def _process_name_candidates(name: str) -> List[str]:
+    """Everything close_app/minimize_app/open_app's dedupe check should try
+    matching a running process name against for a given spoken/alias name.
+
+    A bare alias key is often *not* the real process name -- "vscode" is an
+    alias for the command "code", but the actual running process is
+    "Code.exe"; matching literally on "vscode" never finds it. Resolving
+    through resolve_app_path (same as open_app already does) and, if the
+    target is a bare command rather than a path, following it through
+    shutil.which() to find what it actually launches, recovers the real
+    process stem in cases like this without hardcoding per-app exceptions."""
+    candidates = {name}
+    match = resolve_app_path(name)
+    if not match:
+        return list(candidates)
+    matched_name, target = match
+    candidates.add(matched_name)
+    if os.path.exists(target):
+        candidates.add(Path(target).stem)
+    else:
+        which = shutil.which(target)
+        if which:
+            candidates.add(Path(which).stem)
+    return list(candidates)
+
+
 def open_app(name: str) -> str:
     match = resolve_app_path(name)
     if not match:
         msg = f"Couldn't find an app matching '{name}'."
         log.warning(msg)
-        return msg
+        raise ActionError(msg)
 
     matched_name, target = match
 
     proc_stem = Path(target).stem if os.path.exists(target) else matched_name
     pids = _pids_for_process_names([proc_stem, matched_name])
+    hwnds = _visible_windows_for_pids(pids) if pids else []
+    if not hwnds:
+        # Covers apps with no process name of their own to match on, e.g. Chrome
+        # PWAs (chess, unigram) that all run as chrome.exe/chrome_proxy.exe --
+        # without this, "open chess" would never recognize an already-open PWA
+        # window and would keep launching new ones instead of focusing it.
+        hwnds = _hwnds_for_title(matched_name)
+    if hwnds:
+        _focus_window(hwnds[0])
+        msg = f"{matched_name} is already open -- switching to it."
+        log.info(msg)
+        return msg
     if pids:
-        hwnds = _visible_windows_for_pids(pids)
-        if hwnds:
-            _focus_window(hwnds[0])
-            msg = f"{matched_name} is already open -- switching to it."
-        else:
-            msg = f"{matched_name} is already running."
+        msg = f"{matched_name} is already running."
         log.info(msg)
         return msg
 
@@ -116,22 +180,39 @@ def open_app(name: str) -> str:
     except Exception as e:
         msg = f"Failed to open {matched_name}: {e}"
         log.error(msg)
-        return msg
+        raise ActionError(msg)
 
 
 def close_app(name: str, confirm: ConfirmFn = _default_confirm) -> str:
-    name_lower = name.strip().rstrip(".,!?;: ").lower()
     protected = config.protected_processes
+    name_candidates = {c.strip().rstrip(".,!?;: ").lower() for c in _process_name_candidates(name)}
 
     matches: List[psutil.Process] = []
     for proc in psutil.process_iter(["pid", "name"]):
         pname = (proc.info.get("name") or "").lower()
         pname_stem = pname[:-4] if pname.endswith(".exe") else pname
-        if name_lower in (pname, pname_stem) or name_lower in pname_stem:
+        if any(c in (pname, pname_stem) or c in pname_stem for c in name_candidates):
             matches.append(proc)
 
     if not matches:
-        msg = f"No running process matching '{name}'."
+        # No process matches by name at all -- covers apps that don't have a
+        # process name of their own to match on, e.g. Chrome PWAs (chess,
+        # unigram) which all run as chrome.exe/chrome_proxy.exe shared with the
+        # entire browser. Closing the whole shared process would be wrong (it'd
+        # kill every other Chrome window and tab too), so this closes just the
+        # matching window(s) via WM_CLOSE instead of terminating a process.
+        hwnds = _hwnds_for_title(name)
+        if not hwnds:
+            msg = f"No running process or window matching '{name}'."
+            log.info(msg)
+            raise ActionError(msg)
+        if not VOICE_MODE and not confirm(f"Close {len(hwnds)} window(s) matching '{name}'?"):
+            msg = "Cancelled."
+            log.info("User declined to close: %s", name)
+            return msg
+        for hwnd in hwnds:
+            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+        msg = f"Closed {len(hwnds)} window(s) matching '{name}'."
         log.info(msg)
         return msg
 
@@ -141,7 +222,7 @@ def close_app(name: str, confirm: ConfirmFn = _default_confirm) -> str:
     if blocked and not killable:
         msg = f"'{name}' matches a protected system process ({blocked[0].info['name']}); refusing to close it."
         log.warning(msg)
-        return msg
+        raise ActionError(msg)
 
     names = ", ".join(sorted({p.info["name"] for p in killable}))
     if not VOICE_MODE and not confirm(f"Close {len(killable)} process(es) matching '{name}' ({names})?"):
@@ -245,17 +326,19 @@ def media_previous() -> str:
 
 
 def minimize_app(name: str) -> str:
-    pids = _pids_for_process_names([name])
-    if not pids:
-        msg = f"No running process matching '{name}'."
-        log.info(msg)
-        return msg
-
-    hwnds = _visible_windows_for_pids(pids)
+    pids = _pids_for_process_names(_process_name_candidates(name))
+    hwnds = _visible_windows_for_pids(pids) if pids else []
     if not hwnds:
-        msg = f"'{name}' is running but has no window to minimize."
+        # Falls back to a window-title search when process-name matching finds
+        # nothing running, or finds a process with no window of its own to
+        # minimize -- needed for apps like Chrome PWAs (chess, unigram) that
+        # share chrome.exe/chrome_proxy.exe with the whole browser, so there's
+        # no process name to match on the app's own.
+        hwnds = _hwnds_for_title(name)
+    if not hwnds:
+        msg = f"No running window matching '{name}'."
         log.info(msg)
-        return msg
+        raise ActionError(msg)
 
     for hwnd in hwnds:
         win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
@@ -270,7 +353,7 @@ def open_vscode(path: str = ".", goto: Optional[str] = None) -> str:
     if not code_exe:
         msg = "VS Code CLI ('code') not found on PATH. Install it or enable 'Shell Command: Install code command' from VS Code's command palette."
         log.warning(msg)
-        return msg
+        raise ActionError(msg)
 
     # --reuse-window: without it, the VS Code CLI opens a brand new window on
     # every single invocation, even for the exact same folder -- this is what
@@ -290,7 +373,7 @@ def open_vscode(path: str = ".", goto: Optional[str] = None) -> str:
     except Exception as e:
         msg = f"Failed to open VS Code: {e}"
         log.error(msg)
-        return msg
+        raise ActionError(msg)
 
 
 def run_script(name: str, confirm: ConfirmFn = _default_confirm) -> str:
@@ -303,7 +386,7 @@ def run_script(name: str, confirm: ConfirmFn = _default_confirm) -> str:
     if not command:
         msg = f"'{name}' isn't a whitelisted script. Add it to config/apps.yaml under 'scripts' first."
         log.warning(msg)
-        return msg
+        raise ActionError(msg)
 
     if not VOICE_MODE and not confirm(f"Run script '{key}': {command}?"):
         return "Cancelled."
@@ -322,11 +405,11 @@ def run_script(name: str, confirm: ConfirmFn = _default_confirm) -> str:
     except subprocess.TimeoutExpired:
         msg = f"'{key}' timed out after 120s."
         log.error(msg)
-        return msg
+        raise ActionError(msg)
     except Exception as e:
         msg = f"Failed to run '{key}': {e}"
         log.error(msg)
-        return msg
+        raise ActionError(msg)
 
 
 def open_url(url: str) -> str:
@@ -339,13 +422,73 @@ def open_url(url: str) -> str:
 
 
 def open_folder(path: str) -> str:
-    p = Path(path).expanduser()
+    # expandvars handles %USERNAME%/%APPDATA%-style placeholders -- the LLM
+    # fallback (Phase 4) sometimes emits these literally instead of a real
+    # path (e.g. "C:\Users\%USERNAME%\Desktop") since it doesn't know the
+    # actual username; expanduser alone only covers a leading "~".
+    p = Path(os.path.expandvars(path)).expanduser()
     if not p.exists():
         msg = f"Path does not exist: {p}"
         log.warning(msg)
-        return msg
+        raise ActionError(msg)
     os.startfile(str(p))
     msg = f"Opened folder {p}."
+    log.info(msg)
+    return msg
+
+
+# Named locations "create a folder in <here>" should resolve without the user
+# having to spell out a full path -- these are real filesystem paths (unlike the
+# `shell:`-namespace aliases in config/apps.yaml, which only work for *launching*
+# Explorer at a virtual folder, not for creating a real file inside one).
+_NAMED_LOCATIONS = {
+    "downloads": lambda: Path.home() / "Downloads",
+    "download": lambda: Path.home() / "Downloads",
+    "documents": lambda: Path.home() / "Documents",
+    "desktop": lambda: Path.home() / "Desktop",
+    "pictures": lambda: Path.home() / "Pictures",
+    "music": lambda: Path.home() / "Music",
+    "videos": lambda: Path.home() / "Videos",
+    "home": lambda: Path.home(),
+}
+
+
+def _resolve_location(location: str) -> Optional[Path]:
+    key = location.strip().rstrip(".,!?;: ").lower()
+    if key in _NAMED_LOCATIONS:
+        return _NAMED_LOCATIONS[key]()
+    candidate = Path(os.path.expandvars(location)).expanduser()
+    if candidate.is_dir():
+        return candidate
+    return None
+
+
+def create_folder(location: str, name: str) -> str:
+    base = _resolve_location(location)
+    if base is None:
+        msg = f"Couldn't find a location matching '{location}'."
+        log.warning(msg)
+        raise ActionError(msg)
+    if not base.exists():
+        msg = f"'{base}' doesn't exist."
+        log.warning(msg)
+        raise ActionError(msg)
+
+    folder_name = name.strip().rstrip(".,!?;: ")
+    target = base / folder_name
+    if target.exists():
+        msg = f"'{folder_name}' already exists in {base}."
+        log.info(msg)
+        return msg
+
+    try:
+        target.mkdir(parents=True)
+    except Exception as e:
+        msg = f"Failed to create folder '{folder_name}' in {base}: {e}"
+        log.error(msg)
+        raise ActionError(msg)
+
+    msg = f"Created folder '{folder_name}' in {base}."
     log.info(msg)
     return msg
 

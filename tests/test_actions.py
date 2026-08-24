@@ -21,8 +21,9 @@ class TestCloseApp(unittest.TestCase):
     @patch("psutil.process_iter")
     def test_protected_process_refused(self, mock_iter):
         mock_iter.return_value = [FakeProcess(1, "explorer.exe")]
-        result = actions.close_app("explorer", confirm=lambda p: True)
-        self.assertIn("protected", result.lower())
+        with self.assertRaises(actions.ActionError) as ctx:
+            actions.close_app("explorer", confirm=lambda p: True)
+        self.assertIn("protected", str(ctx.exception).lower())
 
     @patch("psutil.process_iter")
     def test_confirmation_declined_does_not_kill(self, mock_iter):
@@ -43,14 +44,16 @@ class TestCloseApp(unittest.TestCase):
     @patch("psutil.process_iter")
     def test_no_match(self, mock_iter):
         mock_iter.return_value = [FakeProcess(4, "somethingelse.exe")]
-        result = actions.close_app("nonexistentapp", confirm=lambda p: True)
-        self.assertIn("No running process", result)
+        with self.assertRaises(actions.ActionError) as ctx:
+            actions.close_app("nonexistentapp", confirm=lambda p: True)
+        self.assertIn("No running process", str(ctx.exception))
 
 
 class TestRunScript(unittest.TestCase):
     def test_unwhitelisted_script_refused(self):
-        result = actions.run_script("not-in-whitelist", confirm=lambda p: True)
-        self.assertIn("whitelisted", result.lower())
+        with self.assertRaises(actions.ActionError) as ctx:
+            actions.run_script("not-in-whitelist", confirm=lambda p: True)
+        self.assertIn("whitelisted", str(ctx.exception).lower())
 
 
 if __name__ == "__main__":

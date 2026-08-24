@@ -22,8 +22,8 @@ import time
 from pathlib import Path
 from typing import List
 
-from assistant import voiceprint
-from assistant.executor import execute
+from assistant import tts, voiceprint
+from assistant.executor import ExecStatus, execute_with_status
 from assistant.logger import get_logger
 
 log = get_logger(__name__)
@@ -66,7 +66,10 @@ MAX_RECORD_FRAMES = 700      # hard cap (~21s) so a stuck/open mic can't record 
 # ever add speed, never remove the existing fallback.
 COMMAND_WORDS_DIR = CONFIG_DIR / "command_words"
 ACTION_WORDS = {"open", "close", "minimize"}
-TARGET_WORDS = {"spotify", "chrome", "telegram", "vscode", "notepad"}
+TARGET_WORDS = {
+    "spotify", "chrome", "telegram", "vscode", "notepad",
+    "chess", "day_one", "vm", "file_explorer", "terminal", "unigram",
+}
 STANDALONE_COMMANDS = {
     "desktop": "show desktop",
     "wifi": "show wifi",
@@ -169,6 +172,7 @@ def _process_command(audio, whisper, vocabulary_prompt, indicator=None, fast_tex
 
     if not text:
         print("(didn't catch anything)")
+        tts.speak_no_match()
         return
 
     print(f"> {text}")
@@ -176,12 +180,19 @@ def _process_command(audio, whisper, vocabulary_prompt, indicator=None, fast_tex
         log.info("Transcribed: '%s'", text)
     try:
         execute_start = time.monotonic()
-        result = execute(text)
+        status, result = execute_with_status(text)
         log.info("Execution took %.1fs", time.monotonic() - execute_start)
         print(result)
+        if status == ExecStatus.OK:
+            tts.speak_success()
+        elif status == ExecStatus.NO_MATCH:
+            tts.speak_no_match()
+        else:
+            tts.speak_failed()
     except Exception as e:
         log.error("Command execution failed: %s", e)
         print(f"Error running that command: {e}")
+        tts.speak_failed()
 
 
 def _listen_loop(indicator=None) -> None:
@@ -240,6 +251,24 @@ def _listen_loop(indicator=None) -> None:
     for word in set(wake_model.models) - {keyword_name}:
         all_thresholds[word] = FAST_LANE_THRESHOLD
 
+    # Guards against a pile-up: _process_command runs on its own thread so a
+    # slow transcription/action never blocks wake-word detection, but without
+    # this lock every new wake-word trigger spawns *another* concurrent
+    # Whisper transcription on top of whatever's already running. On a
+    # memory/CPU-constrained machine that's a death spiral -- each new
+    # trigger competes with the still-running ones for the same starved
+    # resources, so transcription gets slower, which means more triggers
+    # pile up before the first one finishes, which makes it slower still.
+    # Holding this means "ignore new wake-word triggers while a command is
+    # still being processed" instead of queueing/stacking them.
+    command_lock = threading.Lock()
+
+    def _run_and_release(*args) -> None:
+        try:
+            _process_command(*args)
+        finally:
+            command_lock.release()
+
     try:
         with stream:
             while True:
@@ -252,6 +281,14 @@ def _listen_loop(indicator=None) -> None:
                     frame, threshold=all_thresholds, debounce_time=WAKE_DEBOUNCE_SECONDS
                 )
                 if prediction.get(keyword_name, 0.0) < WAKE_THRESHOLD:
+                    continue
+
+                if not command_lock.acquire(blocking=False):
+                    log.info(
+                        "Wake word heard (score=%.2f) but still processing a previous "
+                        "command -- ignoring until it finishes",
+                        prediction.get(keyword_name, 0.0),
+                    )
                     continue
 
                 print("Wake word detected -- listening for your command...")
@@ -318,6 +355,7 @@ def _listen_loop(indicator=None) -> None:
 
                 if not frames:
                     print("(didn't catch anything)")
+                    command_lock.release()
                     continue
 
                 # Trim the trailing silence that was only recorded to detect
@@ -337,7 +375,7 @@ def _listen_loop(indicator=None) -> None:
                 # that never redirects back, anything) can never block wake-word
                 # detection -- the loop above keeps listening immediately.
                 threading.Thread(
-                    target=_process_command,
+                    target=_run_and_release,
                     args=(audio, whisper, vocabulary_prompt, indicator, fast_text),
                     daemon=True,
                 ).start()
@@ -361,4 +399,16 @@ def run() -> None:
     indicator = WakeIndicator(corner=os.environ.get("INDICATOR_CORNER", "top-right"))
     thread = threading.Thread(target=_listen_loop, args=(indicator,), daemon=True)
     thread.start()
-    indicator.run()
+    try:
+        indicator.run()
+    except Exception:
+        # indicator.run() owns the main thread and _listen_loop is a daemon
+        # thread -- if Tk fails to create its window (seen right after a fresh
+        # boot, when the Task Scheduler "at log on" trigger can fire before the
+        # desktop/display config has actually finished settling) this exception
+        # would otherwise propagate up and kill the whole process, taking wake
+        # word detection down with it and leaving nothing running at all with
+        # no trace in the log. Log it and keep the assistant alive without the
+        # indicator instead.
+        log.exception("On-screen indicator failed to start; continuing without it")
+        thread.join()

@@ -18,8 +18,13 @@ event); actual widget updates only ever happen inside the Tk thread's own poll l
 
 import math
 import queue
+import time
 import tkinter as tk
 from typing import Optional
+
+from assistant.logger import get_logger
+
+log = get_logger(__name__)
 
 IDLE_COLOR = "#8888aa"
 ACTIVE_COLOR = "#ff3355"
@@ -58,6 +63,13 @@ class WakeIndicator:
     def run(self) -> None:
         """Blocking -- creates the window and runs Tkinter's mainloop. Call this
         from whichever thread should own the GUI (see module docstring)."""
+        # A brief head start for the desktop/display config to finish settling --
+        # matters specifically right after a fresh boot, when the Task Scheduler
+        # "at log on" trigger can fire this process before Windows has finished
+        # detecting monitors, which can hand winfo_screenwidth/height() a stale
+        # or wrong value and place the window off whatever's actually visible.
+        time.sleep(3)
+
         root = tk.Tk()
         root.overrideredirect(True)          # no title bar/border
         root.attributes("-topmost", True)    # always on top
@@ -70,6 +82,10 @@ class WakeIndicator:
         screen_h = root.winfo_screenheight()
         x, y = self._position(screen_w, screen_h)
         root.geometry(f"{SIZE}x{SIZE}+{x}+{y}")
+        log.info(
+            "Indicator window placed at (%d, %d) on a %dx%d screen (corner=%s)",
+            x, y, screen_w, screen_h, self._corner,
+        )
 
         canvas = tk.Canvas(root, width=SIZE, height=SIZE, bg=transparent_key, highlightthickness=0)
         canvas.pack()

@@ -67,6 +67,19 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "create_folder",
+        "description": "Create a new folder inside a named location (e.g. 'downloads', 'documents', 'desktop') or a full path.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "Where to create it, e.g. 'downloads' or a full path"},
+                "name": {"type": "string", "description": "Name of the new folder"},
+            },
+            "required": ["location", "name"],
+        },
+    },
+    {
+        "type": "function",
         "name": "open_url",
         "description": "Open a URL in the default web browser.",
         "parameters": {
@@ -128,6 +141,7 @@ _DISPATCH = {
     "close_app": lambda name: actions.close_app(name),
     "open_vscode": lambda path=".", goto=None: actions.open_vscode(path=path, goto=goto),
     "open_folder": lambda path: actions.open_folder(path),
+    "create_folder": lambda location, name: actions.create_folder(location, name),
     "open_url": lambda url: actions.open_url(url),
     "run_script": lambda name: actions.run_script(name),
     "list_known_apps": lambda: actions.list_known_apps(),

@@ -22,3 +22,7 @@ resemblyzer          # lightweight voice-embedding model (pulls in torch CPU aut
 # Phase 4 -- LLM tool-calling for open-ended tasks (implemented, using OpenAI)
 openai
 # anthropic         # Claude -- alternative backend, if using ANTHROPIC_API_KEY instead
+
+# Spoken feedback for the voice front-end (assistant/tts.py) -- offline Windows
+# SAPI5 via pyttsx3, no account or API key needed
+pyttsx3

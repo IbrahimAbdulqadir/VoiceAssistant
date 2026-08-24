@@ -26,6 +26,36 @@ aliases:
   control panel: "control"
   chrome: "google chrome"
   google chrome: "google chrome"
+  # Chrome PWAs (Chess.com, Unigram, WhatsApp Web) all share chrome_proxy.exe as
+  # their target -- auto-discovery only captures the .lnk's target path, not its
+  # --app-id argument, so without an explicit alias here "open chess" would just
+  # launch chrome_proxy.exe with no arguments and do nothing. Found via the
+  # shortcuts in "Start Menu\Programs\Chrome Apps".
+  chess: '"C:\Program Files\Google\Chrome\Application\chrome_proxy.exe" --profile-directory=Default --app-id=kinpkbniadkppecjaginbegiljofpcfc'
+  unigram: '"C:\Program Files\Google\Chrome\Application\chrome_proxy.exe" --profile-directory=Default --app-id=cciccbjmmojiomodbjjoahpcfgdginkk'
+  whatsapp web: '"C:\Program Files\Google\Chrome\Application\chrome_proxy.exe" --profile-directory=Default --app-id=hnpfjngllnobngcgfapefoaidbinmjnm'
+  # Day One is a Microsoft Store (MSIX) app -- it has no Start Menu .lnk or
+  # WindowsApps execution-alias stub, so discovery can't find it at all. Launched
+  # via its AppsFolder shell path instead (PackageFamilyName!AppId from
+  # Get-AppxPackage).
+  day one: 'explorer.exe shell:AppsFolder\22490Automattic.DayOneJournalPrivateDiary_9h07f78gwnchp!DayOne'
+  day_one: 'explorer.exe shell:AppsFolder\22490Automattic.DayOneJournalPrivateDiary_9h07f78gwnchp!DayOne'
+  # "vm" doesn't fuzzy-match "oracle virtualbox" on its own -- point it at the
+  # discovered app by name, same pattern as the chrome alias above.
+  vm: "oracle virtualbox"
+  virtual machine: "oracle virtualbox"
+  # Fast-lane target-word key (train_command_word.py's safe_name turns "file
+  # explorer" into this filename stem) -- same target as the existing alias.
+  file_explorer: "explorer"
+  # Recycle Bin (and other virtual shell folders like it -- This PC, Downloads,
+  # Network -- have the same problem) has no real .exe or Start Menu .lnk for
+  # discovery to find at all; it only exists as a special shell namespace path.
+  recycle bin: "explorer.exe shell:RecycleBinFolder"
+  bin: "explorer.exe shell:RecycleBinFolder"
+  this pc: "explorer.exe shell:MyComputerFolder"
+  my computer: "explorer.exe shell:MyComputerFolder"
+  downloads: "explorer.exe shell:Downloads"
+  documents: "explorer.exe shell:Personal"
 
 # Processes the assistant will never be allowed to close, no matter how it's asked.
 # Killing these can crash the desktop session or the OS itself.
