@@ -452,6 +452,11 @@ _NAMED_LOCATIONS = {
     "music": lambda: Path.home() / "Music",
     "videos": lambda: Path.home() / "Videos",
     "home": lambda: Path.home(),
+    # Telegram Desktop's default download location -- this is where this
+    # user's actual TV/movie downloads live, so it needs to be a first-class
+    # named location, not something you have to spell out a full path for.
+    "telegram desktop": lambda: Path.home() / "Downloads" / "Telegram Desktop",
+    "telegram": lambda: Path.home() / "Downloads" / "Telegram Desktop",
 }
 
 
@@ -533,7 +538,7 @@ VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m
 # Search order when no location is given -- voice commands almost never
 # include a full path, just "play <name> on vlc", so check the places a
 # video is actually likely to be.
-_DEFAULT_VIDEO_SEARCH_LOCATIONS = ["videos", "downloads", "desktop", "documents", "home"]
+_DEFAULT_VIDEO_SEARCH_LOCATIONS = ["videos", "telegram desktop", "downloads", "desktop", "documents", "home"]
 
 
 # Scene-release filenames are never what you'd actually say out loud (e.g.
@@ -548,13 +553,21 @@ _SEASON_EPISODE_WORDS_RE = re.compile(
     r"^(.*?)\s*(?:season|s)\s*(\d{1,2})\s*(?:episode|ep|e)\s*(\d{1,2})\s*$",
     re.IGNORECASE,
 )
-_RELEASE_JUNK_RE = re.compile(
-    r"\b(1080p|720p|480p|2160p|4k|webrip|web[- ]?dl|web|bluray|brrip|bdrip|dvdrip|"
-    r"hdrip|hdtv|x264|x265|h264|h265|hevc|aac\d*|ac3|dts|remux|proper|repack|"
-    r"extended|uncut|multi|dual audio)\b",
+# A *whole token* that marks the start of scene-release metadata (resolution,
+# source, codec, audio) -- matched per-token rather than substring-subbed, and
+# used as a truncation point (see _clean_title) rather than something to strip
+# out piece by piece. Scene naming conventions always put the release group
+# and any other uploader tag *after* every one of these, so truncating at the
+# first one dumps arbitrary group names ("Cinemagic_HD", "SeriesLand4U",
+# "GalaxyTV", "HETeam"...) for free, without having to enumerate every group
+# that exists -- trying to strip them individually is a losing battle.
+_QUALITY_MARKER_RE = re.compile(
+    r"^(?:\d{3,4}p|4k|webrip|web-?dl|web|bluray|brrip|bdrip|dvdrip|hdrip|hdtv|"
+    r"x264|x265|h264|h265|hevc|aac\d*|ac3|dts|remux|proper|repack|extended|"
+    r"uncut|multi|dual|\d{1,2}bit|\d{1,2}ch)$",
     re.IGNORECASE,
 )
-_YEAR_RE = re.compile(r"\(?\b(19|20)\d{2}\b\)?")
+_YEAR_TOKEN_RE = re.compile(r"^\(?(19|20)\d{2}\)?$")
 _NUMBER_WORDS = {
     "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
     "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
@@ -573,16 +586,19 @@ def _words_to_digits(text: str) -> str:
 
 
 def _clean_title(raw: str) -> str:
-    """Strips season/episode tags, year, resolution/source/codec/release-group
-    junk from a filename stem down to just the show/movie title, normalizing
-    dots/underscores to spaces along the way."""
-    s = raw.replace(".", " ").replace("_", " ")
-    s = _SXXEYY_RE.sub(" ", s)
-    s = _YEAR_RE.sub(" ", s)
-    s = _RELEASE_JUNK_RE.sub(" ", s)
+    """Extracts just the show/movie title from a scene-release-style filename
+    stem: keeps only the tokens before the first season/episode tag, year, or
+    resolution/source/codec marker, since everything from there on is metadata
+    (and, past that, an arbitrary release-group/uploader tag -- see
+    _QUALITY_MARKER_RE for why truncating is more robust than stripping)."""
+    s = re.sub(r"[._]", " ", raw)
     s = re.sub(r"[\[\](){}]", " ", s)
-    s = re.sub(r"-\s*[A-Za-z0-9]+\s*$", " ", s)  # trailing "-GROUP" release tag
-    return re.sub(r"\s+", " ", s).strip()
+    title_tokens: List[str] = []
+    for tok in s.split():
+        if _SXXEYY_RE.fullmatch(tok) or _YEAR_TOKEN_RE.match(tok) or _QUALITY_MARKER_RE.match(tok):
+            break
+        title_tokens.append(tok)
+    return " ".join(title_tokens).strip()
 
 
 def _parse_spoken_episode(name: str) -> Optional[Tuple[str, int, int]]:
@@ -615,14 +631,36 @@ def _find_video_file(name: str, location: Optional[str] = None) -> Optional[Path
     episode = _parse_spoken_episode(raw_name)
     if episode is not None:
         title, season, ep = episode
-        tag_pattern = re.compile(rf"s0*{season}e0*{ep}\b", re.IGNORECASE)
+        # (?!\d) instead of \b: real scene-release filenames commonly use "_"
+        # as a separator ("...S01E03_720p..."), and "_" counts as a \w
+        # character in regex just like a digit does, so \b never actually
+        # matches between them -- the episode tag would silently fail to
+        # match on any underscore-separated filename. A trailing digit is the
+        # only thing that actually needs ruling out (so "e1" doesn't also
+        # match inside "e10"); it doesn't care what character, if any, follows.
+        tag_pattern = re.compile(rf"s0*{season}e0*{ep}(?!\d)", re.IGNORECASE)
         tagged_matches = [f for f in candidates if tag_pattern.search(f.stem)]
         if len(tagged_matches) == 1:
             return tagged_matches[0]
         if len(tagged_matches) > 1:
-            # Multiple files share this season/episode tag (different shows in
-            # the same folder, or duplicate quality copies) -- narrow by title.
-            candidates = tagged_matches
+            # Multiple files share this exact season/episode tag -- likely a
+            # library with lots of shows sharing a folder (e.g. Telegram
+            # Desktop's default download folder), not several copies of the
+            # requested one. The tag match itself already confirms this is the
+            # right episode, so pick whichever title fuzzy-matches best rather
+            # than applying VIDEO_MATCH_THRESHOLD below -- there's no genuine
+            # "not found" outcome left once the tag has narrowed it this far,
+            # and a real title (e.g. "The Diplomat") can still legitimately
+            # score under that threshold against its own messier release-group
+            # noise ("Cinemagic HD") relative to how cleanly the other 9
+            # candidates in the tagged set score against *their* own titles.
+            target_lower = (title or raw_name).lower()
+            return max(
+                tagged_matches,
+                key=lambda f: fuzz.token_sort_ratio(target_lower, _clean_title(f.stem).lower()),
+            )
+        # No file carries this exact tag at all -- maybe it isn't scene-style
+        # filenamed; fall through to plain title matching below.
         target = title or raw_name
     else:
         target = raw_name

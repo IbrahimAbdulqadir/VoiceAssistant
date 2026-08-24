@@ -2,6 +2,84 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-24, latest) — proved out against the real library, found and fixed 3 real bugs
+
+The user asked directly: would `"...from telegram desktop in file explorer,
+play the diplomat season 1 episode 3"` actually work? Answer at the time was
+**no**, for three separate, now-fixed reasons, found by testing against this
+user's *actual* `Downloads\Telegram Desktop\` folder (286 real video files,
+confirmed via a real directory listing -- not assumed):
+
+1. **`"telegram desktop"` wasn't a location the assistant knew about at
+   all.** Fixed: added it (and bare `"telegram"`) to `_NAMED_LOCATIONS` in
+   `assistant/actions.py`, pointed at `Downloads\Telegram Desktop` --
+   confirmed that's genuinely where this user's real TV/movie downloads live.
+   Also added it to `_DEFAULT_VIDEO_SEARCH_LOCATIONS`, so it's searched even
+   when no location is spoken at all -- "play the diplomat season 1 episode 3
+   on vlc" now works with zero location clause needed.
+2. **Real, previously-undetected bug: the season/episode tag regex silently
+   failed on this user's actual files.** `tag_pattern` used `\b` (word
+   boundary) right after the episode number, expecting to match
+   `"...S01E03."` (dot-separated, like the synthetic test data from the
+   previous section). This user's real files are underscore-separated
+   (`"...S01E03_720p..."`), and `_` counts as a `\w` character in regex just
+   like a digit does -- so there's never a boundary between `3` and `_`, and
+   the match silently returned nothing on every single real file. Fixed:
+   swapped `\b` for `(?!\d)` (only rules out a following digit, so "e1"
+   still can't false-match inside "e10", but doesn't care what character, if
+   any, comes after) -- confirmed via a direct regex test before and after
+   the fix using the real filename.
+3. **Real bug: the fuzzy-match confidence threshold discarded a match that
+   was already correctly picked as the best of the field.** With the tag bug
+   fixed, `The_Diplomat_S01E03_720p_Cinemagic_HD.mp4` correctly scored
+   highest among all 10 files sharing an `S01E03` tag in that folder (13
+   Reasons Why, Gotham, Mr. Robot, etc. all have their own episode 3) -- but
+   only 64.9/100, below `VIDEO_MATCH_THRESHOLD = 70`, because `_clean_title`'s
+   old regex-substitution approach didn't recognize "Cinemagic" (this
+   library's dominant release-group tag) as junk to strip, so it stayed in
+   the cleaned title and diluted the score. Two-part fix:
+   - Rewrote `_clean_title` from "regex-substitute known junk words" to
+     "keep tokens only up to the first season/episode tag, year, or
+     resolution/source/codec marker" (new `_QUALITY_MARKER_RE`,
+     `_YEAR_TOKEN_RE`) -- scene-release naming conventions always put the
+     release group *after* all of those, so truncating there drops
+     arbitrary group names ("Cinemagic_HD", "SeriesLand4U", "GalaxyTV",
+     "HETeam", "PSA"...) for free, without having to enumerate every group
+     that exists. Confirmed: `The_Diplomat_S01E03_720p_Cinemagic_HD` now
+     cleans to exactly `"The Diplomat"`.
+   - Separately: once multiple files share the *same* season/episode tag,
+     that tag match already proves it's the right episode -- the only open
+     question is which show. Now always returns the best-scoring one from
+     that narrowed set instead of applying `VIDEO_MATCH_THRESHOLD`, which
+     was designed for the very different "no season/episode info at all,
+     fuzzy-search the whole library" case and was wrongly gating a
+     comparison that had already been narrowed to near-certainty.
+- **Verified for real, end to end, no shortcuts**: ran
+  `execute_with_status('play the diplomat season 1 episode 3 on vlc')`
+  against the actual executor/intent-matching/action pipeline (with only
+  `subprocess.Popen` mocked, so no real VLC window popped up) -- matched the
+  fast regex intent (no LLM round-trip), found
+  `The_Diplomat_S01E03_720p_Cinemagic_HD.mp4` in the real
+  `Telegram Desktop` folder, and built the correct VLC launch command. Also
+  re-confirmed `"the diplomat season one episode three"` (spoken numbers),
+  `"13 reasons why season 1 episode 1"`, and `"gotham season 1 episode 3"`
+  all resolve to the correct real file in that same folder.
+- All 30 tests still pass after these fixes.
+- **Still open**: the user's exact original phrasing (location clause
+  *before* "play", and no "vlc" mentioned) still wouldn't match the fast
+  regex intent -- it would only work today if the LLM fallback correctly
+  guessed `play_video(name=..., location="telegram desktop")` on its own,
+  which is possible but not fast (~15-20s round trip) and not guaranteed.
+  Since Telegram Desktop is now in the default search order, the location
+  clause isn't even necessary anymore for the fast path to work -- so the
+  practical fix for the user is to just say "play the diplomat season 1
+  episode 3 on vlc" without the location preamble. Could still add a
+  location-first regex ordering (same pattern as `create_folder`'s two
+  orderings) if this phrasing turns out to be how the user naturally talks;
+  not done yet since it wasn't clear this was really needed once the
+  location became unnecessary.
+- Listener restarted and confirmed live with all of this.
+
 ## Follow-up session (2026-08-24, even later still) — real title matching for `play_video`
 
 Immediately after `play_video` shipped (see section right below), the user
