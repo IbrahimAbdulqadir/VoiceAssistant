@@ -138,7 +138,7 @@ def _build_vocabulary_prompt() -> str:
     )
 
 
-def _process_command(audio, whisper, vocabulary_prompt, indicator=None, fast_text=None) -> None:
+def _process_command(audio, whisper_ready, whisper_holder, vocabulary_prompt, indicator=None, fast_text=None) -> None:
     """Transcribes (unless fast_text is already resolved by the fast lane) and
     executes one already-recorded command. Runs on its own background thread
     (see _listen_loop) so a slow or hung action -- a network call, an OAuth
@@ -154,6 +154,14 @@ def _process_command(audio, whisper, vocabulary_prompt, indicator=None, fast_tex
         text = fast_text
         log.info("Fast-lane command: '%s'", text)
     else:
+        if not whisper_ready.is_set():
+            # Only reachable in the first few seconds after startup, if a full
+            # (non-fast-lane) command is spoken before Whisper's background load
+            # finishes -- wait for it here rather than on the wake-word thread, so
+            # detection itself is never blocked, only this one command's response.
+            log.info("Whisper still loading -- waiting before transcribing")
+            whisper_ready.wait()
+        whisper = whisper_holder["model"]
         transcribe_start = time.monotonic()
         segments, _ = whisper.transcribe(
             audio, language="en", beam_size=1, initial_prompt=vocabulary_prompt
@@ -220,24 +228,44 @@ def _listen_loop(indicator=None) -> None:
         samplerate=SAMPLE_RATE, blocksize=FRAME_SAMPLES, dtype="int16", channels=1, callback=_callback
     )
 
-    # "base" + greedy decoding (beam_size=1) instead of "small" + beam_size=5 below --
-    # this machine only has 4 logical cores, and beam search on "small" was taking
-    # ~20s to transcribe a short command. Trades a little accuracy for a lot of
-    # latency; override WHISPER_MODEL=small in config/.env to trade back if the
-    # smaller model's accuracy isn't good enough.
-    model_size = os.environ.get("WHISPER_MODEL", "base")
-    whisper = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=os.cpu_count() or 4)
-    # One-time warm-up so the first real command isn't the one that eats ctranslate2's
-    # cold-start cost (thread pool spin-up, weight paging) on top of its own latency.
-    whisper.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), language="en", beam_size=1)
+    # vocabulary_prompt only reads config aliases -- cheap, no reason to wait on Whisper for it.
     vocabulary_prompt = _build_vocabulary_prompt()
+
+    # Whisper's load + one-time warm-up transcription is the slow part (the "base"
+    # model still takes real time to page in cold, worse right after a fresh
+    # boot/resume when disk cache is cold and other startup processes are competing
+    # for CPU). Wake-word detection doesn't need Whisper at all -- it only needs
+    # wake_model, already loaded above -- so load Whisper on its own thread and open
+    # the mic immediately instead of making wake-word detection (and the fast lane)
+    # wait minutes for a model it doesn't use. This is what was silently delaying
+    # "mic activation" after every restart: the stream literally wasn't opened until
+    # Whisper had finished loading AND warming up.
+    whisper_holder: dict = {}
+    whisper_ready = threading.Event()
+
+    def _load_whisper() -> None:
+        # "base" + greedy decoding (beam_size=1) instead of "small" + beam_size=5 --
+        # this machine only has 4 logical cores, and beam search on "small" was
+        # taking ~20s to transcribe a short command. Trades a little accuracy for a
+        # lot of latency; override WHISPER_MODEL=small in config/.env to trade back
+        # if the smaller model's accuracy isn't good enough.
+        model_size = os.environ.get("WHISPER_MODEL", "base")
+        w = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=os.cpu_count() or 4)
+        # One-time warm-up so the first real command isn't the one that eats
+        # ctranslate2's cold-start cost (thread pool spin-up, weight paging).
+        w.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32), language="en", beam_size=1)
+        whisper_holder["model"] = w
+        whisper_ready.set()
+        log.info("Whisper model ready (%s)", model_size)
+
+    threading.Thread(target=_load_whisper, daemon=True, name="whisper-loader").start()
 
     wake_label = "custom wake word" if is_custom else f"'{keyword_name}'"
     speaker_note = "voice-locked to you" if voiceprint.is_enrolled() else "responds to anyone -- run `python main.py --enroll` to lock it to your voice"
     print(f"Listening for the wake word ({wake_label}, {speaker_note})... Ctrl+C to stop.")
     log.info(
-        "Wake word listener started (keyword=%s, custom=%s, whisper=%s, enrolled=%s)",
-        keyword_name, is_custom, model_size, voiceprint.is_enrolled(),
+        "Wake word listener started (keyword=%s, custom=%s, enrolled=%s); Whisper loading in background",
+        keyword_name, is_custom, voiceprint.is_enrolled(),
     )
 
     def _read_frame() -> "np.ndarray":
@@ -376,7 +404,7 @@ def _listen_loop(indicator=None) -> None:
                 # detection -- the loop above keeps listening immediately.
                 threading.Thread(
                     target=_run_and_release,
-                    args=(audio, whisper, vocabulary_prompt, indicator, fast_text),
+                    args=(audio, whisper_ready, whisper_holder, vocabulary_prompt, indicator, fast_text),
                     daemon=True,
                 ).start()
     except KeyboardInterrupt:

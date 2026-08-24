@@ -2,6 +2,60 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-24, later) — mic-activation delay + invisible indicator
+
+User reported two things noticed after resuming from a shutdown: the mic takes
+too long to start responding, and the on-screen indicator icon doesn't appear
+until *another* window (VS Code) gets opened. Both were root-caused against
+`logs/assistant.log` timestamps, not guessed at, and both were real
+pre-existing architectural bugs.
+
+- **Mic activation delay (`assistant/listen.py`)**: `_listen_loop` opened the
+  audio stream (`with stream:`) only *after* Whisper had both loaded and run
+  its one-time warm-up transcription — even though wake-word detection and
+  the fast lane need nothing from Whisper at all, only the (much lighter)
+  wake model. Confirmed from the log: on one restart, `Indicator window
+  placed` fired at 15:58:00 but `Wake word listener started` (mic actually
+  live) didn't fire until 16:01:47 — a ~3.5 minute gap where nothing was
+  listening, worse right after a cold boot when disk cache is cold and other
+  startup processes are competing for CPU.
+  - Fixed by loading Whisper on its own background thread
+    (`threading.Event` + a holder dict) while the wake model loads and the
+    mic stream opens immediately after. `_process_command` only blocks on
+    `whisper_ready.wait()` if a full (non-fast-lane) command actually needs
+    transcription before Whisper's background load finishes — wake-word
+    detection itself is never blocked.
+  - Verified live after restart: `Wake word listener started` at 16:12:12,
+    `Whisper model ready (base)` only 16s later at 16:12:28 — running in
+    parallel instead of stacked sequentially.
+- **Indicator icon invisible until another window opens (`assistant/indicator.py`)**:
+  the borderless (`overrideredirect`) always-on-top Tk window only set
+  `-topmost` once, at creation. On Windows this can silently fail to actually
+  composite the window above the desktop if DWM/explorer.exe hasn't fully
+  finished starting yet — the window exists and Tkinter considers it
+  topmost, but nothing forces Windows to actually recompute the z-order
+  until something else does (e.g. opening VS Code), which matches exactly
+  what was reported. This is the same early-boot race already worked around
+  with sleep delays in a previous session — those delays alone weren't
+  always enough.
+  - Fixed by reasserting `-topmost` + `root.lift()` once a second for the
+    first 30 seconds after the window is created (`TOPMOST_REASSERT_SECONDS`),
+    instead of a single one-shot attribute set. Not directly confirmed
+    visually this session (needs a real reboot to fully verify), but the
+    mechanism is a well-established Windows/Tk workaround for exactly this
+    failure mode.
+  - **Still not fully closed out**: this fix hasn't been confirmed against
+    an actual reboot/shutdown-resume cycle yet, only against a manual
+    scheduled-task restart mid-session (where the icon reliably shows either
+    way, since the process wasn't literally starting at Windows boot). If it
+    still goes missing after a real shutdown+startup, the 30s window is the
+    first thing to extend, or switch to reasserting indefinitely rather than
+    just for a fixed startup window.
+- Committed and pushed this session's prior pending work first (spoken
+  feedback, folder creation, fast-lane models) before starting on these two —
+  see the section below for what that covered. All 19 tests still pass after
+  these two fixes; listener restarted and confirmed live with both.
+
 ## Follow-up session (2026-08-24) — spoken feedback + folder creation
 
 Tackled the first two items off the NEXT AGENDA below, in the priority order the

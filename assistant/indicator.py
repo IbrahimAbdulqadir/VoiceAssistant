@@ -38,6 +38,18 @@ POLL_MS = 50
 
 CORNER_MARGIN = 24
 
+# How long after creation to keep re-forcing the window topmost/raised. A single
+# "-topmost" attribute set at creation can silently fail to actually take visible
+# effect on Windows if DWM/explorer.exe hasn't fully finished starting yet (the
+# same early-boot race already worked around elsewhere with sleep delays) -- the
+# window exists and is topmost as far as Tkinter is concerned, but doesn't actually
+# render above the desktop until something else forces Windows to recompute the
+# z-order. Observed symptom: the icon staying invisible after a restart until an
+# unrelated window (e.g. VS Code) was opened. Reasserting periodically for a while
+# is cheap insurance against that instead of a guess at the "right" one-time delay.
+TOPMOST_REASSERT_SECONDS = 30
+TOPMOST_REASSERT_EVERY_MS = 1000
+
 
 class WakeIndicator:
     def __init__(self, corner: str = "top-right", margin: int = CORNER_MARGIN):
@@ -49,6 +61,8 @@ class WakeIndicator:
         self._radius = IDLE_RADIUS
         self._color = IDLE_COLOR
         self._is_active = False
+        self._topmost_reassert_until = 0.0
+        self._last_topmost_reassert = 0.0
 
     def activate(self) -> None:
         """Thread-safe: call the instant the wake word fires -- grows and stays
@@ -93,6 +107,7 @@ class WakeIndicator:
         self._root = root
         self._canvas = canvas
         self._draw()
+        self._topmost_reassert_until = time.monotonic() + TOPMOST_REASSERT_SECONDS
         root.after(POLL_MS, self._poll)
 
         try:
@@ -127,6 +142,12 @@ class WakeIndicator:
             self._radius = ACTIVE_RADIUS if new_state else IDLE_RADIUS
             self._color = ACTIVE_COLOR if new_state else IDLE_COLOR
             self._draw()
+
+        now = time.monotonic()
+        if now < self._topmost_reassert_until and now - self._last_topmost_reassert >= TOPMOST_REASSERT_EVERY_MS / 1000:
+            self._last_topmost_reassert = now
+            self._root.attributes("-topmost", True)
+            self._root.lift()
 
         self._root.after(POLL_MS, self._poll)
 
