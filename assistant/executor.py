@@ -3,6 +3,7 @@ entry point. This is the thing Phase 2 (wake word + Whisper) feeds transcribed t
 into, unchanged -- it doesn't know or care whether the text was typed or spoken.
 """
 
+import re
 from enum import Enum
 from typing import Optional, Tuple
 
@@ -44,9 +45,12 @@ HELP_TEXT = """Commands:
   play <x> on spotify           - open Spotify search results for a song/artist
   open mail / open email       - open Gmail in the browser
   search mail for <x>          - open Gmail scoped to a search
-  open vscode [in <path>]     - open VS Code, optionally at a folder/file
-  open folder <path>          - open a folder in File Explorer
-  open url <url>              - open a URL in the default browser
+  open vscode [in <path>]     - open VS Code, optionally at a folder/file (searches
+                                 your whole home folder if the exact path isn't given)
+  open folder <path>          - open a folder in File Explorer (also searches by name)
+  open file <name>             - open a file with its default app (searches for it)
+  find file <name>             - report where a file lives without opening it
+  open url <url>               - open a URL in the default browser
   run <script name>           - run a whitelisted script from config/apps.yaml
   list apps                   - list known/discoverable app names
   help                        - show this message
@@ -94,6 +98,34 @@ def _open_file_line(path: str, line: str):
 @intent(r"^open folder\s+(.+)$")
 def _open_folder(path: str):
     return actions.open_folder(path)
+
+
+# "open downloads" / "open the desktop folder" etc. -- built from
+# actions._NAMED_LOCATIONS (the single source of truth for named-location
+# spelling) rather than duplicating that list here, and registered ahead of
+# the generic "open <x>" catch-all so these resolve straight to the real
+# folder via open_folder instead of being treated as an app name to launch
+# (which previously only worked for "downloads"/"documents" at all, and only
+# because config/apps.yaml happened to alias them to an explorer.exe shell
+# command -- every other named location, e.g. "open pictures", had no such
+# alias and would misfire against whatever app fuzzy-matched closest).
+_LOCATION_NAMES = sorted(actions._NAMED_LOCATIONS.keys(), key=len, reverse=True)
+_LOCATION_ALTERNATION = "|".join(re.escape(n) for n in _LOCATION_NAMES)
+
+
+@intent(rf"^open\s+(?:the\s+)?({_LOCATION_ALTERNATION})(?:\s+folder)?$")
+def _open_named_location(name: str):
+    return actions.open_folder(name)
+
+
+@intent(r"^(?:find|locate|search for)\s+(?:the\s+)?file\s+(.+)$")
+def _find_file(name: str):
+    return actions.find_file(name)
+
+
+@intent(r"^open\s+file\s+(.+)$")
+def _open_file(name: str):
+    return actions.open_file(name)
 
 
 # Two orderings of the same command, both natural: "create a folder in downloads,

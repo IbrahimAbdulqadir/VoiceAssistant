@@ -33,6 +33,26 @@ class TestIntentRouting(unittest.TestCase):
         execute("open folder C:/Users/me/Documents")
         mock_folder.assert_called_once_with("C:/Users/me/Documents")
 
+    @patch("assistant.executor.actions.open_folder", return_value="ok")
+    def test_open_named_location_beats_catchall(self, mock_folder):
+        execute("open downloads")
+        mock_folder.assert_called_once_with("downloads")
+
+    @patch("assistant.executor.actions.open_folder", return_value="ok")
+    def test_open_named_location_with_folder_word(self, mock_folder):
+        execute("open the desktop folder")
+        mock_folder.assert_called_once_with("desktop")
+
+    @patch("assistant.executor.actions.open_folder", return_value="ok")
+    def test_open_multiword_named_location(self, mock_folder):
+        execute("open telegram desktop")
+        mock_folder.assert_called_once_with("telegram desktop")
+
+    @patch("assistant.executor.actions.open_app", return_value="ok")
+    def test_open_app_still_wins_for_non_location_names(self, mock_open):
+        execute("open spotify")
+        mock_open.assert_called_once_with("spotify")
+
     @patch("assistant.executor.actions.open_url", return_value="ok")
     def test_open_url_beats_catchall(self, mock_url):
         execute("open website github.com")

@@ -75,6 +75,82 @@ class TestCreateFile(unittest.TestCase):
             actions.create_file("not-a-real-location-xyz", "notes")
 
 
+class TestFindFile(unittest.TestCase):
+    def test_finds_file_nested_in_subfolder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "projects" / "voiceassistant"
+            nested.mkdir(parents=True)
+            (nested / "actions.py").touch()
+            result = actions._find_file("actions.py", location=tmp)
+            self.assertEqual(result.name, "actions.py")
+
+    def test_matches_by_name_ignoring_extension(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "notes.txt").touch()
+            result = actions._find_file("notes", location=tmp)
+            self.assertEqual(result.name, "notes.txt")
+
+    def test_prunes_excluded_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            excluded = Path(tmp) / "node_modules"
+            excluded.mkdir()
+            (excluded / "target.js").touch()
+            result = actions._find_file("target.js", location=tmp)
+            self.assertIsNone(result)
+
+    def test_no_match_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = actions._find_file("nonexistentfile123", location=tmp)
+            self.assertIsNone(result)
+
+
+class TestFindFolder(unittest.TestCase):
+    def test_finds_nested_folder_by_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "a" / "b" / "target_folder"
+            nested.mkdir(parents=True)
+            result = actions._find_folder("target_folder", location=tmp)
+            self.assertEqual(result.name, "target_folder")
+
+
+class TestOpenFolderSearchFallback(unittest.TestCase):
+    @patch("assistant.actions.os.startfile")
+    def test_falls_back_to_search_for_nonexistent_literal_path(self, mock_startfile):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "deep" / "myfolder"
+            nested.mkdir(parents=True)
+            with patch("assistant.actions._iter_search_roots", return_value=[Path(tmp)]):
+                result = actions.open_folder("myfolder")
+            self.assertIn("myfolder", result)
+            mock_startfile.assert_called_once()
+
+    @patch("assistant.actions.os.startfile")
+    def test_resolves_named_location_directly(self, mock_startfile):
+        result = actions.open_folder("downloads")
+        expected = str(Path.home() / "Downloads")
+        self.assertIn(expected, result)
+        mock_startfile.assert_called_once_with(expected)
+
+    def test_unresolvable_name_refused(self):
+        with self.assertRaises(actions.ActionError):
+            actions.open_folder("definitely-not-a-real-location-xyz-123")
+
+
+class TestOpenVscodeSearchFallback(unittest.TestCase):
+    @patch("assistant.actions.subprocess.Popen")
+    @patch("assistant.actions.shutil.which", return_value="C:\\fake\\code.exe")
+    def test_falls_back_to_search_for_nonexistent_literal_path(self, mock_which, mock_popen):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "sub" / "myfile.py"
+            target.parent.mkdir(parents=True)
+            target.touch()
+            with patch("assistant.actions._find_file", return_value=target):
+                result = actions.open_vscode(path="myfile.py")
+            self.assertIn(str(target), result)
+            args = mock_popen.call_args[0][0]
+            self.assertIn(str(target), args)
+
+
 class TestVideoTitleExtraction(unittest.TestCase):
     def test_cleans_scene_release_junk(self):
         self.assertEqual(actions._clean_title("Gotham.S01E01.1080p.WEB.x264-GROUP"), "Gotham")

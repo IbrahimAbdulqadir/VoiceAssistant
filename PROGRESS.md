@@ -2,7 +2,77 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
-## Follow-up session (2026-08-24, latest) — proved out against the real library, found and fixed 3 real bugs
+## Follow-up session (2026-08-24, even later) — "open downloads" now opens the real folder deterministically
+
+User: "something like open downloads, it should show downloads folder on file
+explorer." This already happened to work for "downloads" and "documents"
+specifically, but only because `config/apps.yaml` hardcodes them as app
+aliases to `explorer.exe shell:Downloads`/`shell:Personal` (flagged as a gap
+in an earlier session -- `open_folder({'path': 'downloads'})` "isn't even a
+real path on its own"). Every *other* named location (`desktop`, `pictures`,
+`music`, `videos`, `home`, `telegram`/`telegram desktop`) had no such alias,
+so "open pictures" etc. would fall to `open_app`'s fuzzy app-name matching
+and could misfire against an unrelated installed app.
+
+Fixed properly instead of patching per-location yaml aliases:
+- `actions.open_folder` now resolves through `_resolve_location` first (the
+  same named-location table `create_folder`/`create_file` already used) --
+  covers every key in `_NAMED_LOCATIONS` plus an already-existing literal
+  path -- before falling back to the recursive `_find_folder` fuzzy search.
+- `executor.py`: new intent `open (the )?<location>( folder)?` built directly
+  from `actions._NAMED_LOCATIONS.keys()` (so there's one source of truth, not
+  two lists to keep in sync), registered ahead of the generic `open <x>` app
+  catch-all. Verified end-to-end (only `os.startfile` mocked):
+  `execute_with_status('open downloads')` now calls
+  `os.startfile('C:\\Users\\SPIDER MAN\\Downloads')` directly -- deterministic,
+  no fuzzy app matching involved -- and "open pictures"/"open the desktop
+  folder"/"open telegram desktop" all resolve the same way.
+- All 43 tests pass (6 new: named-location routing beats the app catch-all,
+  multi-word location, non-location app names still route to `open_app`,
+  `open_folder` resolving a named location directly, and refusing an
+  unresolvable name).
+
+## Follow-up session (2026-08-24, latest) — whole-file-system search, not just Telegram Desktop
+
+User feedback: file/folder awareness was effectively hardcoded to Telegram
+Desktop (via `_DEFAULT_VIDEO_SEARCH_LOCATIONS`/`_NAMED_LOCATIONS`), and
+`"open <file> in vscode"` didn't actually work for a bare filename -- it was
+passed straight through to the VS Code CLI as a literal path, which silently
+opened/created a bogus path relative to cwd instead of finding the real file.
+
+Fixed in `assistant/actions.py`:
+- New `_find_file(name, location=None)` / `_find_folder(name, location=None)`:
+  generic, recursive (via `os.walk`, unlike the video search which only
+  scanned one folder's top level) fuzzy-match search. With no `location`
+  given, searches the user's *entire home directory*, not one hardcoded app
+  folder -- this is the general "explore the file system" capability that was
+  missing. `_SEARCH_EXCLUDE_DIRS` (`AppData`, `node_modules`, `.venv`,
+  `Program Files`, etc.) and skipping dot-directories keep it fast (~2s over
+  this user's real home directory, confirmed by timing `_find_file`).
+- `open_vscode`: when `path` isn't an exact existing path (and no `goto`),
+  falls back to `_find_file` before invoking the VS Code CLI -- this is the
+  direct fix for "open a particular file in VS Code" not working.
+- `open_folder`: same fallback via `_find_folder`, so "open folder <name>"
+  works from a bare name too, not just an exact path.
+- New actions `find_file`/`open_file` (search + report / search + launch with
+  default app), wired into both `executor.py` (new `find file <name>` /
+  `open file <name>` intents) and `llm_backend.py`'s TOOLS/DISPATCH so the
+  Phase 4 LLM fallback has the same capability.
+- Verified end-to-end (not just unit tests): `_find_file('actions.py')` with
+  no location found the real `assistant/actions.py` in this repo by walking
+  the whole home directory in ~2s; `execute_with_status('open vscode in
+  actions.py')` (only `subprocess.Popen` mocked) resolved to the real full
+  path and built the correct `code --reuse-window <path>` command.
+- All 37 tests pass (added `TestFindFile`, `TestFindFolder`,
+  `TestOpenFolderSearchFallback`, `TestOpenVscodeSearchFallback` to
+  `tests/test_actions.py`).
+- **Not done**: no depth/result cap or "multiple matches" disambiguation --
+  a home directory with several files of the same name will just silently
+  pick whichever fuzzy-scores highest score-first-found; fine for now since
+  this mirrors how `_find_video_file` already behaves, but worth revisiting
+  if it turns out to matter in practice.
+
+## Follow-up session (2026-08-24) — proved out against the real library, found and fixed 3 real bugs
 
 The user asked directly: would `"...from telegram desktop in file explorer,
 play the diplomat season 1 episode 3"` actually work? Answer at the time was

@@ -45,11 +45,16 @@ TOOLS = [
     {
         "type": "function",
         "name": "open_vscode",
-        "description": "Open VS Code, optionally at a specific folder path or file:line location.",
+        "description": (
+            "Open VS Code, optionally at a specific folder/file. 'path' does not need "
+            "to be an exact filesystem path -- if it isn't one, this searches the "
+            "user's whole home folder recursively for a matching file/folder name, so "
+            "just pass the name as given (e.g. path='actions.py'), never a guessed path."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Folder path to open; defaults to current directory"},
+                "path": {"type": "string", "description": "Folder/file name or path to open; defaults to current directory"},
                 "goto": {"type": "string", "description": "Optional file:line to jump to, e.g. 'main.py:10'"},
             },
             "required": [],
@@ -58,11 +63,47 @@ TOOLS = [
     {
         "type": "function",
         "name": "open_folder",
-        "description": "Open a folder in Windows File Explorer.",
+        "description": (
+            "Open a folder in Windows File Explorer. If 'path' isn't an exact existing "
+            "path, this searches the user's whole home folder recursively by name."
+        ),
         "parameters": {
             "type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "find_file",
+        "description": (
+            "Search the user's whole home folder (or a given location) recursively "
+            "for a file by name and report where it is, without opening it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "File name (with or without extension) to search for"},
+                "location": {"type": "string", "description": "Optional named location or full path to scope the search to"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "open_file",
+        "description": (
+            "Open a file with its default associated app. Searches the user's whole "
+            "home folder (or a given location) recursively when 'name' isn't already "
+            "an exact path."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "File name (with or without extension) to open"},
+                "location": {"type": "string", "description": "Optional named location or full path to scope the search to"},
+            },
+            "required": ["name"],
         },
     },
     {
@@ -173,6 +214,8 @@ _DISPATCH = {
     "close_app": lambda name: actions.close_app(name),
     "open_vscode": lambda path=".", goto=None: actions.open_vscode(path=path, goto=goto),
     "open_folder": lambda path: actions.open_folder(path),
+    "find_file": lambda name, location=None: actions.find_file(name, location),
+    "open_file": lambda name, location=None: actions.open_file(name, location),
     "create_folder": lambda location, name: actions.create_folder(location, name),
     "create_file": lambda location, name: actions.create_file(location, name),
     "play_video": lambda name, location=None: actions.play_video(name, location),

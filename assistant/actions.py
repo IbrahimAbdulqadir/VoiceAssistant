@@ -357,6 +357,20 @@ def open_vscode(path: str = ".", goto: Optional[str] = None) -> str:
         log.warning(msg)
         raise ActionError(msg)
 
+    target = path
+    if goto is None and path != ".":
+        # A spoken/typed "open <file> in vscode" is almost never a real literal
+        # path -- it's just a name. Previously this was passed straight through
+        # to the VS Code CLI, which silently opened (or created) a bogus path
+        # relative to cwd instead of the file the user actually meant. Falling
+        # back to a filesystem search, same as play_video does for video
+        # titles, resolves a bare name to wherever the file actually lives.
+        p = Path(os.path.expandvars(path)).expanduser()
+        if not p.exists():
+            found = _find_file(path)
+            if found is not None:
+                target = str(found)
+
     # --reuse-window: without it, the VS Code CLI opens a brand new window on
     # every single invocation, even for the exact same folder -- this is what
     # was causing "open vscode" to pile up extra windows instead of just
@@ -365,11 +379,11 @@ def open_vscode(path: str = ".", goto: Optional[str] = None) -> str:
     if goto:
         args += ["--goto", goto]
     else:
-        args.append(path)
+        args.append(target)
 
     try:
         subprocess.Popen(args, shell=True)
-        msg = f"Opened VS Code at {goto or path}."
+        msg = f"Opened VS Code at {goto or target}."
         log.info(msg)
         return msg
     except Exception as e:
@@ -423,18 +437,146 @@ def open_url(url: str) -> str:
     return msg
 
 
+# Directories that are either huge, machine-internal, or virtually never where a
+# user-requested file/folder actually lives -- walking into these would make a
+# whole-file-system search take forever (or trip permission errors) for no real
+# payoff, so they're pruned before os.walk ever descends into them. Matched
+# case-insensitively against a bare directory name, not a full path.
+_SEARCH_EXCLUDE_DIRS = {
+    "appdata", "node_modules", "__pycache__", "venv", ".venv",
+    "$recycle.bin", "system volume information", "windows", "programdata",
+    "program files", "program files (x86)", "site-packages",
+}
+FILE_MATCH_THRESHOLD = 70  # fuzzy filename-match score (0-100) below which we give up
+
+
+def _iter_search_roots(location: Optional[str]) -> List[Path]:
+    """Where to look when the caller didn't hand over an exact, already-existing
+    path. A named/explicit location narrows the search to just that folder; with
+    none given, this searches the user's whole home directory -- not just one
+    hardcoded app's download folder -- since a voice command asking to open some
+    file rarely says where it lives."""
+    if location:
+        base = _resolve_location(location)
+        if base is None:
+            candidate = Path(os.path.expandvars(location)).expanduser()
+            base = candidate if candidate.is_dir() else None
+        return [base] if base is not None else []
+    return [Path.home()]
+
+
+def _walk_paths(root: Path, want_dirs: bool):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames
+            if d.lower() not in _SEARCH_EXCLUDE_DIRS and not d.startswith(".")
+        ]
+        names = dirnames if want_dirs else filenames
+        for n in names:
+            yield Path(dirpath) / n
+
+
+def _find_file(name: str, location: Optional[str] = None) -> Optional[Path]:
+    """Generic filename search: the same fuzzy-match approach _find_video_file
+    uses for video titles, but for any file and recursing into subfolders
+    (video search only ever looks at one folder's top level) under whichever
+    root(s) _iter_search_roots picks. This is what lets "open <file> in vscode"
+    or "find <file>" resolve a bare name instead of requiring an exact path."""
+    raw_name = name.strip().rstrip(".,!?;: ")
+    roots = _iter_search_roots(location)
+
+    has_ext = "." in raw_name
+    target_lower = raw_name.lower()
+    stem_lower = Path(raw_name).stem.lower() if has_ext else target_lower
+
+    best: Optional[Path] = None
+    best_score = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        for f in _walk_paths(root, want_dirs=False):
+            fname_lower = f.name.lower()
+            if fname_lower == target_lower or (not has_ext and f.stem.lower() == target_lower):
+                return f  # exact match -- stop looking immediately
+            score = fuzz.token_sort_ratio(stem_lower, f.stem.lower())
+            if score > best_score:
+                best, best_score = f, score
+
+    return best if best_score >= FILE_MATCH_THRESHOLD else None
+
+
+def _find_folder(name: str, location: Optional[str] = None) -> Optional[Path]:
+    """Same idea as _find_file but for directories -- lets "open folder <name>"
+    resolve a bare folder name anywhere under the search root(s) instead of
+    requiring the caller to already know its full path."""
+    raw_name = name.strip().rstrip(".,!?;: ")
+    roots = _iter_search_roots(location)
+    target_lower = raw_name.lower()
+
+    best: Optional[Path] = None
+    best_score = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        for d in _walk_paths(root, want_dirs=True):
+            if d.name.lower() == target_lower:
+                return d  # exact match -- stop looking immediately
+            score = fuzz.token_sort_ratio(target_lower, d.name.lower())
+            if score > best_score:
+                best, best_score = d, score
+
+    return best if best_score >= FILE_MATCH_THRESHOLD else None
+
+
 def open_folder(path: str) -> str:
-    # expandvars handles %USERNAME%/%APPDATA%-style placeholders -- the LLM
-    # fallback (Phase 4) sometimes emits these literally instead of a real
-    # path (e.g. "C:\Users\%USERNAME%\Desktop") since it doesn't know the
-    # actual username; expanduser alone only covers a leading "~".
-    p = Path(os.path.expandvars(path)).expanduser()
-    if not p.exists():
-        msg = f"Path does not exist: {p}"
+    # _resolve_location covers named locations ("downloads", "desktop",
+    # "pictures", "telegram desktop", ...) *and* an already-existing literal
+    # path (env-var placeholders like %USERNAME% included) -- previously this
+    # only handled the literal-path case, so "open downloads" on its own
+    # wasn't a real path and fell straight to a filesystem search (or the LLM
+    # fallback guessing something equally wrong) instead of just resolving it.
+    p = _resolve_location(path)
+    if p is None:
+        p = _find_folder(path)
+    if p is None:
+        msg = f"Path does not exist: {path}"
         log.warning(msg)
         raise ActionError(msg)
     os.startfile(str(p))
     msg = f"Opened folder {p}."
+    log.info(msg)
+    return msg
+
+
+def find_file(name: str, location: Optional[str] = None) -> str:
+    """Voice-facing "find file X" / "where is X" action -- just reports where a
+    file lives without opening it, useful when the user isn't sure it exists or
+    doesn't remember which folder they saved it in."""
+    match = _find_file(name, location)
+    if match is None:
+        where = f" in {location}" if location else " anywhere under your home folder"
+        msg = f"Couldn't find a file matching '{name}'{where}."
+        log.warning(msg)
+        raise ActionError(msg)
+    msg = f"Found {match.name} at {match}."
+    log.info(msg)
+    return msg
+
+
+def open_file(name: str, location: Optional[str] = None) -> str:
+    """Opens a file with its default associated app, searching for it (same as
+    open_vscode's fallback) when the given name isn't already an exact path."""
+    p = Path(os.path.expandvars(name)).expanduser()
+    if not p.is_file():
+        found = _find_file(name, location)
+        if found is None:
+            where = f" in {location}" if location else " anywhere under your home folder"
+            msg = f"Couldn't find a file matching '{name}'{where}."
+            log.warning(msg)
+            raise ActionError(msg)
+        p = found
+    os.startfile(str(p))
+    msg = f"Opened {p.name}."
     log.info(msg)
     return msg
 
