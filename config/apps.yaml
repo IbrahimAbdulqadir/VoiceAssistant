@@ -56,6 +56,10 @@ aliases:
   my computer: "explorer.exe shell:MyComputerFolder"
   downloads: "explorer.exe shell:Downloads"
   documents: "explorer.exe shell:Personal"
+  # VLC has multiple Start Menu shortcuts (the app itself, "reset preferences and
+  # cache files", etc.) that a bare "vlc" fuzzy-matches ambiguously -- pin it to
+  # the real executable explicitly, same pattern as chess/day_one above.
+  vlc: "C:\\Program Files\\VideoLAN\\VLC\\vlc.exe"
 
 # Processes the assistant will never be allowed to close, no matter how it's asked.
 # Killing these can crash the desktop session or the OS itself.

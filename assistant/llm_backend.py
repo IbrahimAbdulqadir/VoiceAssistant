@@ -80,6 +80,32 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "create_file",
+        "description": "Create a new empty file inside a named location (e.g. 'downloads', 'documents', 'desktop') or a full path. Defaults to a .txt extension if none is given.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string", "description": "Where to create it, e.g. 'downloads' or a full path"},
+                "name": {"type": "string", "description": "Name of the new file"},
+            },
+            "required": ["location", "name"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "play_video",
+        "description": "Find a video file by name and play it in VLC. Searches Videos, Downloads, Desktop, Documents, and home if no location is given.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Video file name (extension optional)"},
+                "location": {"type": "string", "description": "Optional named location or full path to search"},
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "type": "function",
         "name": "open_url",
         "description": "Open a URL in the default web browser.",
         "parameters": {
@@ -142,6 +168,8 @@ _DISPATCH = {
     "open_vscode": lambda path=".", goto=None: actions.open_vscode(path=path, goto=goto),
     "open_folder": lambda path: actions.open_folder(path),
     "create_folder": lambda location, name: actions.create_folder(location, name),
+    "create_file": lambda location, name: actions.create_file(location, name),
+    "play_video": lambda name, location=None: actions.play_video(name, location),
     "open_url": lambda url: actions.open_url(url),
     "run_script": lambda name: actions.run_script(name),
     "list_known_apps": lambda: actions.list_known_apps(),

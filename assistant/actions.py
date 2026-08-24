@@ -487,6 +487,100 @@ def create_folder(location: str, name: str) -> str:
         msg = f"Failed to create folder '{folder_name}' in {base}: {e}"
         log.error(msg)
         raise ActionError(msg)
+    msg = f"Created folder '{folder_name}' in {base}."
+    log.info(msg)
+    return msg
+
+
+def create_file(location: str, name: str) -> str:
+    base = _resolve_location(location)
+    if base is None:
+        msg = f"Couldn't find a location matching '{location}'."
+        log.warning(msg)
+        raise ActionError(msg)
+    if not base.exists():
+        msg = f"'{base}' doesn't exist."
+        log.warning(msg)
+        raise ActionError(msg)
+
+    file_name = name.strip().rstrip(".,!?;: ")
+    # A spoken name almost never includes an extension ("create a file named
+    # notes") -- default to .txt so the file actually opens in something
+    # sensible, but respect one if the user did say/type it (e.g. "notes.py").
+    if "." not in file_name:
+        file_name += ".txt"
+
+    target = base / file_name
+    if target.exists():
+        msg = f"'{file_name}' already exists in {base}."
+        log.info(msg)
+        return msg
+
+    try:
+        target.touch()
+    except Exception as e:
+        msg = f"Failed to create file '{file_name}' in {base}: {e}"
+        log.error(msg)
+        raise ActionError(msg)
+    msg = f"Created file '{file_name}' in {base}."
+    log.info(msg)
+    return msg
+
+
+VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg")
+# Search order when no location is given -- voice commands almost never
+# include a full path, just "play <name> on vlc", so check the places a
+# video is actually likely to be.
+_DEFAULT_VIDEO_SEARCH_LOCATIONS = ["videos", "downloads", "desktop", "documents", "home"]
+
+
+def _find_video_file(name: str, location: Optional[str] = None) -> Optional[Path]:
+    target_stem = name.strip().rstrip(".,!?;: ").lower()
+
+    if location:
+        base = _resolve_location(location)
+        search_dirs = [base] if base is not None else []
+    else:
+        search_dirs = [d for k in _DEFAULT_VIDEO_SEARCH_LOCATIONS if (d := _NAMED_LOCATIONS[k]()).exists()]
+
+    best: Optional[Path] = None
+    for directory in search_dirs:
+        if not directory.exists():
+            continue
+        for f in directory.iterdir():
+            if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS:
+                continue
+            if f.stem.lower() == target_stem:
+                return f  # exact match -- stop looking immediately
+            if best is None and target_stem in f.stem.lower():
+                best = f
+    return best
+
+
+def play_video(name: str, location: Optional[str] = None) -> str:
+    match = resolve_app_path("vlc")
+    if not match:
+        msg = "VLC isn't installed (or isn't discoverable) on this machine."
+        log.warning(msg)
+        raise ActionError(msg)
+    _, vlc_target = match
+
+    video = _find_video_file(name, location)
+    if video is None:
+        where = f" in {location}" if location else " in Videos, Downloads, Desktop, Documents, or your home folder"
+        msg = f"Couldn't find a video matching '{name}'{where}."
+        log.warning(msg)
+        raise ActionError(msg)
+
+    try:
+        subprocess.Popen([vlc_target, str(video)])
+        msg = f"Playing {video.name} in VLC."
+        log.info(msg)
+        return msg
+    except Exception as e:
+        msg = f"Failed to open {video.name} in VLC: {e}"
+        log.error(msg)
+        raise ActionError(msg)
 
     msg = f"Created folder '{folder_name}' in {base}."
     log.info(msg)

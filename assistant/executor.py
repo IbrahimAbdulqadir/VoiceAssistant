@@ -30,6 +30,8 @@ HELP_TEXT = """Commands:
   close <app>                 - close a running app (asks for confirmation)
   minimize <app>               - minimize a running app's window
   create folder <name> in <location> - create a folder (e.g. "create a folder called spiderman in downloads")
+  create file <name> in <location> - create a file (e.g. "create a file called notes in downloads")
+  play <video> on vlc [from <location>] - find and play a video file in VLC
   show desktop                 - toggle show-desktop (minimize/restore all windows)
   open notifications           - open the notification center
   open search                  - open Windows search
@@ -106,6 +108,25 @@ def _create_folder_location_first(location: str, name: str):
 @intent(r"^create (?:a |a new )?folder(?: called| named)? (.+?) in (.+)$")
 def _create_folder_name_first(name: str, location: str):
     return actions.create_folder(location, name)
+
+
+# Same two-ordering pattern as create folder above.
+@intent(r"^create (?:a |a new )?file in (.+?),?\s*(?:name it|named|call it|called)\s+(.+)$")
+def _create_file_location_first(location: str, name: str):
+    return actions.create_file(location, name)
+
+
+@intent(r"^create (?:a |a new )?file(?: called| named)? (.+?) in (.+)$")
+def _create_file_name_first(name: str, location: str):
+    return actions.create_file(location, name)
+
+
+# "play spiderman on vlc", "open spiderman in vlc from downloads" -- location is
+# optional; when omitted, actions.play_video searches the common video folders
+# (Videos, Downloads, Desktop, Documents, home) itself.
+@intent(r"^(?:play|open)\s+(.+?)\s+(?:on|in)\s+vlc(?:\s+(?:in|from)\s+(.+))?$")
+def _play_video(name: str, location: Optional[str] = None):
+    return actions.play_video(name, location)
 
 
 @intent(r"^open\s+(?:website|url)\s+(.+)$")

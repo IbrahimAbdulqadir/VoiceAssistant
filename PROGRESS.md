@@ -2,6 +2,80 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-24, even later) — VLC video playback + create-file bug
+
+User asked for a "play a video on VLC" command, and reported "create a file"
+wasn't working / felt slow. Root-caused the second one against
+`logs/assistant.log` before touching anything: `'Create a file named spider
+in downloads'` was transcribed correctly (not a hearing problem) but there
+was no `create_file` action or intent at all — only `create_folder` existed.
+It fell through to the LLM fallback, which took ~15s just to pick a tool,
+guessed wrong (`open_folder({'path': 'downloads'})`, which isn't even a real
+path on its own), and the whole round trip took 22.9s. That slowness *was*
+the bug — not a mishear.
+
+- **New `actions.create_file(location, name)`** (`assistant/actions.py`) —
+  same `_resolve_location` named-location resolution as `create_folder`.
+  Defaults to a `.txt` extension if the spoken name doesn't include one
+  (voice almost never says an extension), respects one if given (e.g.
+  "notes.py"). New executor intents mirroring `create_folder`'s two
+  orderings ("create a file in downloads, name it X" / "create a file called
+  X in downloads"), registered ahead of the generic `open <x>` catch-all so
+  it doesn't fall to the LLM anymore — verified instant (`ExecStatus.OK`, no
+  LLM round-trip) via a real end-to-end run against the actual Downloads
+  folder, confirmed on disk, then cleaned up. Also exposed as an LLM tool for
+  oddly-phrased requests, same as `create_folder`.
+  - **Found and fixed a real pre-existing bug while in there**:
+    `create_folder` had no success-message return at all — it called
+    `target.mkdir()` and fell through to an implicit `return None`, unlike
+    every other action in the file. Harmless in practice (the voice front-end
+    still said "Done" since that's driven by `ExecStatus`, not the return
+    value) but the CLI/log would have shown literal "None" as the result.
+    Fixed to return a proper `"Created folder '<name>' in <base>."` message.
+- **New `actions.play_video(name, location=None)`** + `_find_video_file()`
+  (`assistant/actions.py`) — resolves VLC via the existing `resolve_app_path`
+  (same mechanism every other app uses), searches for a matching video file
+  by name (extension optional, common video extensions checked) in a given
+  named location, or across Videos/Downloads/Desktop/Documents/home in that
+  order if none is given -- voice commands essentially never include a full
+  path. New executor intent: `play/open <name> on/in vlc [in/from
+  <location>]`, registered ahead of the generic catch-all. Also exposed as an
+  LLM tool.
+  - **Added an explicit `vlc` alias in `config/apps.yaml`** pinned to the
+    real `C:\Program Files\VideoLAN\VLC\vlc.exe` — discovered while checking
+    this that a bare "vlc" was fuzzy-matching to the wrong Start Menu
+    shortcut ("VLC media player - reset preferences and cache files"),
+    confirmed in the log from an earlier command this session. Same fix
+    pattern as the chess/day_one aliases from a previous session.
+  - **Known limitation, not fixed**: `_find_video_file` only checks files
+    directly inside a location, not subfolders — this user's actual videos
+    live in `Videos\Screen Recordings\`, one level down, so "play X on vlc"
+    won't find them as-is. Flagged to the user rather than guessing whether
+    to make the search recursive (a full recursive walk of "home" specifically
+    could be slow) — revisit if it comes up as a real complaint.
+  - **Known risk, not confirmed one way or the other**: the fast-lane system
+    (see its own section below) has a standalone `"play"` word-detector for
+    media play/pause that runs concurrently with normal listening. It's
+    architecturally possible for it to fire the instant it hears "play" at
+    the start of "play spiderman on vlc" (or the pre-existing "play X on
+    spotify") and cut the command short as a play/pause toggle before the
+    rest of the sentence is spoken. Not observed in the log so far (checked:
+    every historical `Fast-lane command: 'play'`/`'pause'` entry was a
+    standalone word, not the start of a longer sentence), but a real
+    possibility now that "play" is the first word of two different full
+    commands. If this ever actually misfires, the fix is in the fast-lane
+    debounce logic in `listen.py`, not in the new action code.
+- New tests in `tests/test_actions.py`: `TestCreateFile` (extension
+  defaulting, extension preservation, unknown-location refusal) and
+  `TestPlayVideo` (no-match refusal, VLC-not-found refusal, and a
+  mocked-`subprocess.Popen` success case using a real temp directory + real
+  temp video file). 25 tests total, all passing. Didn't add a live
+  `play_video` test that actually launches VLC — didn't want to pop a real
+  VLC window open unexpectedly during an automated test run.
+- Listener restarted and confirmed live with all of this session's changes
+  (mic-activation fix from earlier + these two new capabilities); confirmed
+  clean startup in the log with no import/syntax errors.
+
 ## Follow-up session (2026-08-24, later) — mic-activation delay + invisible indicator
 
 User reported two things noticed after resuming from a shutdown: the mic takes
