@@ -2,6 +2,69 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-24, later still) — "Spiderman isn't responding" root-caused: a hung Spotify OAuth permanently locked the listener
+
+User: "spiderman isn't responding again." Root-caused from `logs/assistant.log`
+and the live process, not guessed:
+- The real `\VoiceAssistantListener` scheduled task's `pythonw.exe` process
+  (`Task To Run: pythonw.exe main.py --listen`, "Keeps the Spiderman voice
+  assistant listener... always running, hidden, and self-restarting") was
+  still alive but had gone completely silent after `2026-08-24 18:15:14`,
+  when it logged `Executing intent for: 'Play gca by shaevice on spotify'`
+  and then never logged anything again -- no `Execution took`, nothing.
+  Every wake-word trigger since then logged "still processing a previous
+  command -- ignoring until it finishes" (checked: this repeated for 27+
+  minutes straight, 18:15 through past 18:42).
+- Found the actual hang: a live Chrome tab was still sitting open at
+  `accounts.spotify.com/authorize?...&redirect_uri=http://127.0.0.1:8888/callback`.
+  `config/.env` has real `SPOTIFY_CLIENT_ID`/`SECRET` configured and no
+  `config/.spotify_cache` existed yet, so `spotify_client.play()` (via
+  spotipy's `SpotifyOAuth(open_browser=True)`) opened that consent page for a
+  first-time login and then blocked forever inside spotipy's local
+  callback-server wait -- the user never completed the login in the browser
+  (voice-triggered in the background), so it just hung indefinitely. This is
+  exactly the failure mode `listen.py`'s own comments already named ("an
+  OAuth flow stuck on a browser that never redirects back") -- but the
+  existing mitigation (run `_process_command` on its own thread) only kept
+  *wake-word detection* alive, not future *commands*: `command_lock` (a plain
+  `threading.Lock`) was held for the entire hang, so once one command got
+  stuck, every subsequent command was silently ignored forever, with zero
+  spoken or logged indication of *why* -- until the process was killed and
+  restarted by hand. "Again" in the user's report means this had already
+  happened before.
+- **Immediate recovery**: `schtasks /end /tn VoiceAssistantListener` (the
+  process itself outlived that -- it was blocked in a C-level socket wait,
+  not something a task-scheduler stop signal alone kills) confirmed the PID
+  was gone, then `schtasks /run /tn VoiceAssistantListener` brought up a
+  fresh instance. Verified fully healthy via the log: custom wake word
+  loaded, all 16 fast-lane command word models loaded, mic stream open,
+  Whisper model ready -- confirmed end-to-end restart, not just "process
+  exists."
+- **Root fix (`assistant/listen.py`)**: replaced the plain `command_lock =
+  threading.Lock()` with a new `_CommandGate` class that behaves like a lock
+  for mutual exclusion, except a holder that's been busy longer than
+  `COMMAND_TIMEOUT_SECONDS` (env-configurable, default 60s) is treated as
+  abandoned and handed over to the next wake-word trigger instead of blocking
+  forever -- logs a warning when this happens. The abandoned command's thread
+  is already a daemon and keeps running in the background (so a very-late
+  OAuth completion, if it ever comes, still speaks its own result via the
+  existing `tts.speak_*` calls in `_process_command` -- untouched). This is a
+  systemic fix, not a Spotify-specific patch: bounds the outage from *any*
+  future hung integration (a network call with no timeout, another OAuth
+  flow, etc.), not just this one.
+- New `tests/test_listen.py` (`TestCommandGate`, 5 tests): acquire-when-free,
+  second-acquire-fails-while-busy, acquire-after-release,
+  stale-holder-abandoned-after-a-short-timeout, release-is-a-safe-no-op.
+  All 48 tests pass.
+- **Not done / user follow-up needed**: the dangling Spotify login tab was
+  left open in Chrome (not touched -- completing OAuth logins isn't something
+  to do on the user's behalf). Until the user finishes that login once (or
+  it's abandoned), the *next* "play X on spotify" will still hit the same
+  first-time-auth browser flow and block for up to `COMMAND_TIMEOUT_SECONDS`
+  before being abandoned (bounded now, but still a real wait each time) --
+  completing the login once will cache a token to `config/.spotify_cache` and
+  this stops happening entirely.
+
 ## Follow-up session (2026-08-24, even later) — "open downloads" now opens the real folder deterministically
 
 User: "something like open downloads, it should show downloads folder on file

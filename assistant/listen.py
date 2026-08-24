@@ -18,9 +18,10 @@ set SHOW_INDICATOR=0 in config/.env to turn it off.
 """
 
 import os
+import threading
 import time
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from assistant import tts, voiceprint
 from assistant.executor import ExecStatus, execute_with_status
@@ -82,6 +83,50 @@ STANDALONE_COMMANDS = {
     "previous": "previous",
 }
 FAST_LANE_THRESHOLD = float(os.environ.get("FAST_LANE_THRESHOLD", "0.85"))
+
+# How long a single command (transcription + action) may run before a new wake
+# word is allowed to take over anyway. Real-world example that motivated this:
+# "play X on spotify" with no cached Spotify token yet opens a browser tab for
+# the user to log in and blocks waiting for that OAuth redirect -- if the user
+# doesn't complete it (they weren't looking at the screen, the command was
+# fired in the background, etc.), that wait never times out on its own, and
+# without this the plain Lock it used to hold stayed locked forever: every
+# later wake word was silently ignored ("still processing a previous command")
+# until the process was killed and restarted by hand. This bounds that outage
+# to COMMAND_TIMEOUT_SECONDS instead of leaving it permanent.
+COMMAND_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_TIMEOUT_SECONDS", "60"))
+
+
+class _CommandGate:
+    """A "one command at a time" gate like threading.Lock, except a holder that's
+    been busy longer than `timeout` seconds is treated as abandoned and handed
+    over to the next acquire instead of blocking forever. The abandoned
+    command's thread is a daemon and keeps running in the background (it may
+    still complete, speak its result, etc.) -- it just no longer blocks
+    anything new."""
+
+    def __init__(self, timeout: float):
+        self._timeout = timeout
+        self._busy_since: Optional[float] = None
+        self._guard = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        with self._guard:
+            now = time.monotonic()
+            if self._busy_since is not None:
+                if now - self._busy_since < self._timeout:
+                    return False
+                log.warning(
+                    "Previous command exceeded %.0fs -- abandoning it (it may "
+                    "still finish in the background) and accepting new commands",
+                    self._timeout,
+                )
+            self._busy_since = now
+            return True
+
+    def release(self) -> None:
+        with self._guard:
+            self._busy_since = None
 
 
 def _load_wake_model():
@@ -204,8 +249,6 @@ def _process_command(audio, whisper_ready, whisper_holder, vocabulary_prompt, in
 
 
 def _listen_loop(indicator=None) -> None:
-    import threading
-
     import numpy as np
     import sounddevice as sd
     from faster_whisper import WhisperModel
@@ -281,21 +324,23 @@ def _listen_loop(indicator=None) -> None:
 
     # Guards against a pile-up: _process_command runs on its own thread so a
     # slow transcription/action never blocks wake-word detection, but without
-    # this lock every new wake-word trigger spawns *another* concurrent
-    # Whisper transcription on top of whatever's already running. On a
+    # this every new wake-word trigger spawns *another* concurrent Whisper
+    # transcription on top of whatever's already running. On a
     # memory/CPU-constrained machine that's a death spiral -- each new
     # trigger competes with the still-running ones for the same starved
     # resources, so transcription gets slower, which means more triggers
     # pile up before the first one finishes, which makes it slower still.
     # Holding this means "ignore new wake-word triggers while a command is
-    # still being processed" instead of queueing/stacking them.
-    command_lock = threading.Lock()
+    # still being processed" instead of queueing/stacking them -- except a
+    # command stuck past COMMAND_TIMEOUT_SECONDS is abandoned instead of
+    # blocking every future command too (see _CommandGate).
+    command_gate = _CommandGate(COMMAND_TIMEOUT_SECONDS)
 
     def _run_and_release(*args) -> None:
         try:
             _process_command(*args)
         finally:
-            command_lock.release()
+            command_gate.release()
 
     try:
         with stream:
@@ -311,7 +356,7 @@ def _listen_loop(indicator=None) -> None:
                 if prediction.get(keyword_name, 0.0) < WAKE_THRESHOLD:
                     continue
 
-                if not command_lock.acquire(blocking=False):
+                if not command_gate.try_acquire():
                     log.info(
                         "Wake word heard (score=%.2f) but still processing a previous "
                         "command -- ignoring until it finishes",
@@ -383,7 +428,7 @@ def _listen_loop(indicator=None) -> None:
 
                 if not frames:
                     print("(didn't catch anything)")
-                    command_lock.release()
+                    command_gate.release()
                     continue
 
                 # Trim the trailing silence that was only recorded to detect
@@ -420,8 +465,6 @@ def run() -> None:
     # the main thread, so the audio/wake-word loop runs on a background thread
     # instead -- pulse() itself is thread-safe, only the drawing happens on the Tk
     # thread. Set SHOW_INDICATOR=0 in config/.env to skip this and run as before.
-    import threading
-
     from assistant.indicator import WakeIndicator
 
     indicator = WakeIndicator(corner=os.environ.get("INDICATOR_CORNER", "top-right"))
