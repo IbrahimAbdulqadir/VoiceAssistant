@@ -45,6 +45,8 @@ class ActionError(Exception):
 # Set True by listen.py once at startup -- a voice session has no stdin for
 # answering a typed y/N prompt, so close/run-script confirmation is skipped there.
 # Speaker verification (Phase 3) is the real gate on who can issue a command at all.
+# Shutdown/restart/hibernate are the exception: they use _gui_confirm below instead
+# of _default_confirm, which needs no stdin, so those three never skip.
 VOICE_MODE = False
 
 
@@ -52,6 +54,26 @@ def _default_confirm(prompt: str) -> bool:
     """Fallback confirmation used when no UI-specific confirm function is supplied."""
     answer = input(f"{prompt} [y/N]: ").strip().lower()
     return answer in ("y", "yes")
+
+
+def _gui_confirm(prompt: str) -> bool:
+    """Confirmation via the native Windows OK/Cancel message box instead of a typed
+    y/N prompt -- used for shutdown/restart/hibernate so voice sessions (no stdin
+    to answer a console prompt with) still get a real confirmation instead of the
+    action just firing immediately. OK is the default button, so Enter accepts it
+    the same way Windows' own shutdown dialogs work; Escape (or Cancel) declines.
+    Runs on the per-command thread (see listen.py's _run_and_release), never the
+    wake-word thread, so blocking here until the box is dismissed can't freeze
+    wake-word detection -- it only holds up this one command's response."""
+    MB_OKCANCEL = 0x1
+    MB_ICONWARNING = 0x30
+    MB_TOPMOST = 0x40000
+    MB_SETFOREGROUND = 0x10000
+    IDOK = 1
+    result = ctypes.windll.user32.MessageBoxW(
+        None, prompt, "Spiderman", MB_OKCANCEL | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND
+    )
+    return result == IDOK
 
 
 def _pids_for_process_names(names: List[str]) -> Set[int]:
@@ -439,8 +461,8 @@ def media_previous() -> str:
 # the delay that was explicitly declined.
 
 
-def shutdown_system(confirm: ConfirmFn = _default_confirm) -> str:
-    if not VOICE_MODE and not confirm("Shut down the computer now?"):
+def shutdown_system(confirm: ConfirmFn = _gui_confirm) -> str:
+    if not confirm("Shut down the computer now?"):
         msg = "Cancelled."
         log.info("User declined to shut down.")
         return msg
@@ -455,8 +477,8 @@ def shutdown_system(confirm: ConfirmFn = _default_confirm) -> str:
     return msg
 
 
-def restart_system(confirm: ConfirmFn = _default_confirm) -> str:
-    if not VOICE_MODE and not confirm("Restart the computer now?"):
+def restart_system(confirm: ConfirmFn = _gui_confirm) -> str:
+    if not confirm("Restart the computer now?"):
         msg = "Cancelled."
         log.info("User declined to restart.")
         return msg
@@ -491,12 +513,14 @@ def cancel_shutdown() -> str:
     return msg
 
 
-def hibernate_system(confirm: ConfirmFn = _default_confirm) -> str:
+def hibernate_system(confirm: ConfirmFn = _gui_confirm) -> str:
     # Unlike shutdown/restart, Windows has no delayed/cancellable form of
     # hibernate (shutdown /h takes no /t) -- and hibernating suspends this
     # process along with everything else, so (like real Sleep) it can't be
-    # woken back up by voice either, only a physical key/button press.
-    if not VOICE_MODE and not confirm("Hibernate the computer now?"):
+    # woken back up by voice either, only a physical key/button press. There's
+    # no post-hoc cancel window here either, so the confirmation dialog is the
+    # only chance to back out.
+    if not confirm("Hibernate the computer now?"):
         msg = "Cancelled."
         log.info("User declined to hibernate.")
         return msg

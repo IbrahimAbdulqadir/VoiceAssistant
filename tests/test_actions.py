@@ -193,10 +193,21 @@ class TestPowerManagement(unittest.TestCase):
         mock_run.assert_called_once_with(["shutdown", "/s", "/t", "0"], check=True)
 
     @patch("assistant.actions.subprocess.run")
-    def test_shutdown_in_voice_mode_skips_confirmation(self, mock_run):
-        # Voice mode has no stdin to answer a confirm prompt with -- same
-        # convention as close_app/run_script.
-        with patch("assistant.actions.VOICE_MODE", True):
+    def test_shutdown_in_voice_mode_still_confirms_via_gui(self, mock_run):
+        # Unlike close_app/run_script, shutdown/restart/hibernate must not fire
+        # unconfirmed in voice mode -- they use the GUI OK/Cancel box (no stdin
+        # needed) instead of skipping confirmation outright.
+        with patch("assistant.actions.VOICE_MODE", True), \
+             patch("assistant.actions.ctypes.windll.user32.MessageBoxW", return_value=2) as mock_box:
+            result = actions.shutdown_system()
+        mock_box.assert_called_once()
+        mock_run.assert_not_called()
+        self.assertEqual(result, "Cancelled.")
+
+    @patch("assistant.actions.subprocess.run")
+    def test_shutdown_default_confirm_uses_gui_ok(self, mock_run):
+        IDOK = 1
+        with patch("assistant.actions.ctypes.windll.user32.MessageBoxW", return_value=IDOK):
             actions.shutdown_system()
         mock_run.assert_called_once_with(["shutdown", "/s", "/t", "0"], check=True)
 
