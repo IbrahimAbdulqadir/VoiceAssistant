@@ -2,7 +2,60 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
-## Follow-up session (2026-08-24, later still) — "Spiderman isn't responding" root-caused: a hung Spotify OAuth permanently locked the listener
+## Follow-up session (2026-08-24, latest) — "close file explorer" refused forever + "open jumong" not recognized
+
+User reported two things after using the new open-folder/search behavior:
+1. Opened Telegram Desktop's folder ("in browser" = a File Explorer window,
+   confirmed via `win32gui.EnumWindows` -- title was literally `"Telegram
+   Desktop - File Explorer"`), then couldn't close it: "close file explorer"
+   didn't work, and their theory was "it doesn't know how to close since I
+   didn't open with open file explorer."
+2. "open jumong" -- a real folder confirmed to exist
+   (`C:\Users\SPIDER MAN\OneDrive\Pictures\Jumong`, found by `_find_folder`
+   in 0.34s) -- came back as "didn't understand" instead of opening it.
+
+Root-caused both against `assistant/actions.py`, not guessed:
+
+1. **`close_app("file explorer")` real bug, unrelated to the user's theory**:
+   "file explorer" resolves (via the `file explorer: "explorer"` alias) to
+   the process name `explorer.exe`, which is *always* running (it's the one
+   shared desktop-shell process) and is (correctly) in `protected_processes`.
+   Because that process-name match was found, the code took the "protected,
+   refuse" branch and never even tried the window-title-based close that
+   already existed for the *other* branch (no process match at all, e.g.
+   Chrome PWAs) -- so "close file explorer" / "close explorer" could
+   *never* work, for any open Explorer window, regardless of how it was
+   opened. Confirmed directly: `actions.close_app("telegram desktop", ...)`
+   (naming the window by its content, not "file explorer") already worked
+   correctly and closed the real window -- so the user's theory about *how*
+   it was opened wasn't the actual cause.
+   - Fix: extracted the existing window-title-close logic into
+     `_close_windows_by_title()` and call it from the protected-process
+     branch too, before refusing -- "close file explorer" now closes the
+     matching Explorer window(s) (verified for real: opened Telegram
+     Desktop's folder, ran `close_app("file explorer")`, confirmed via
+     `win32gui.EnumWindows` that the window was actually gone), while
+     `explorer.exe` itself still can never be terminated as a process.
+2. **`open_app`/the generic "open <x>" catch-all had no folder/file
+   fallback at all** -- it only ever tried `resolve_app_path` (installed
+   apps), so any name that wasn't a recognized app -- a downloaded show's
+   folder, "jumong" -- went straight to "Couldn't find an app matching
+   'jumong'" even though `_find_folder`/`_find_file` (added earlier this
+   session for `open_vscode`/`open_folder`) would have found it instantly.
+   Fix: `open_app` now tries `_find_folder` then `_find_file` before
+   refusing. Verified end-to-end (only `os.startfile` mocked):
+   `execute_with_status('open jumong')` now opens
+   `C:\Users\SPIDER MAN\OneDrive\Pictures\Jumong` directly.
+3. All 52 tests pass (4 new: `close_app` protected-but-has-a-window case
+   closes the window instead of refusing, protected-with-no-window-either
+   still refuses, `open_app` folder-search and file-search fallbacks, and
+   refusing when nothing matches at all). Updated the two pre-existing
+   `close_app` tests that weren't previously mocking `_hwnds_for_title` --
+   with the new fallback in place they would otherwise have made real
+   `win32gui.PostMessage` calls against whatever windows happen to be open
+   on the machine running the test suite.
+
+## Follow-up session (2026-08-24, later) — "Spiderman isn't responding" root-caused: a hung Spotify OAuth permanently locked the listener
 
 User: "spiderman isn't responding again." Root-caused from `logs/assistant.log`
 and the live process, not guessed:

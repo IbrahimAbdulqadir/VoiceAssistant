@@ -20,12 +20,26 @@ class FakeProcess:
 
 
 class TestCloseApp(unittest.TestCase):
+    @patch("assistant.actions._hwnds_for_title", return_value=[])
     @patch("psutil.process_iter")
-    def test_protected_process_refused(self, mock_iter):
+    def test_protected_process_refused_with_no_window_either(self, mock_iter, mock_hwnds):
         mock_iter.return_value = [FakeProcess(1, "explorer.exe")]
         with self.assertRaises(actions.ActionError) as ctx:
             actions.close_app("explorer", confirm=lambda p: True)
         self.assertIn("protected", str(ctx.exception).lower())
+
+    @patch("assistant.actions.win32gui.PostMessage")
+    @patch("assistant.actions._hwnds_for_title", return_value=[12345])
+    @patch("psutil.process_iter")
+    def test_protected_process_closes_matching_window_instead(self, mock_iter, mock_hwnds, mock_post):
+        # explorer.exe is the one shared shell process AND the host for every
+        # open Explorer *window* -- "close file explorer" should close the
+        # window that's actually open, not just refuse because the shared
+        # process itself is (correctly) protected from being killed.
+        mock_iter.return_value = [FakeProcess(1, "explorer.exe")]
+        result = actions.close_app("file explorer", confirm=lambda p: True)
+        self.assertIn("Closed", result)
+        mock_post.assert_called_once()
 
     @patch("psutil.process_iter")
     def test_confirmation_declined_does_not_kill(self, mock_iter):
@@ -43,12 +57,48 @@ class TestCloseApp(unittest.TestCase):
         self.assertTrue(proc.terminated)
         self.assertIn("Closed", result)
 
+    @patch("assistant.actions._hwnds_for_title", return_value=[])
     @patch("psutil.process_iter")
-    def test_no_match(self, mock_iter):
+    def test_no_match(self, mock_iter, mock_hwnds):
         mock_iter.return_value = [FakeProcess(4, "somethingelse.exe")]
         with self.assertRaises(actions.ActionError) as ctx:
             actions.close_app("nonexistentapp", confirm=lambda p: True)
         self.assertIn("No running process", str(ctx.exception))
+
+
+class TestOpenAppSearchFallback(unittest.TestCase):
+    """'open jumong' etc. -- a name that isn't a known/installed app should fall
+    back to a folder/file search instead of just refusing, since a spoken "open
+    <x>" can't be told apart from "open <folder/file x>" up front."""
+
+    @patch("assistant.actions.os.startfile")
+    @patch("assistant.actions.resolve_app_path", return_value=None)
+    def test_falls_back_to_folder_search(self, mock_resolve, mock_startfile):
+        with tempfile.TemporaryDirectory() as tmp:
+            nested = Path(tmp) / "jumong"
+            nested.mkdir()
+            with patch("assistant.actions._iter_search_roots", return_value=[Path(tmp)]):
+                result = actions.open_app("jumong")
+            self.assertIn("jumong", result)
+            mock_startfile.assert_called_once()
+
+    @patch("assistant.actions.os.startfile")
+    @patch("assistant.actions.resolve_app_path", return_value=None)
+    def test_falls_back_to_file_search_when_no_folder_matches(self, mock_resolve, mock_startfile):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "jumong.mp4").touch()
+            with patch("assistant.actions._iter_search_roots", return_value=[Path(tmp)]):
+                result = actions.open_app("jumong")
+            self.assertIn("jumong.mp4", result)
+            mock_startfile.assert_called_once()
+
+    @patch("assistant.actions.resolve_app_path", return_value=None)
+    def test_refused_when_nothing_matches_at_all(self, mock_resolve):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("assistant.actions._iter_search_roots", return_value=[Path(tmp)]):
+                with self.assertRaises(actions.ActionError) as ctx:
+                    actions.open_app("definitely-not-anything-xyz")
+            self.assertIn("app, folder, or file", str(ctx.exception))
 
 
 class TestRunScript(unittest.TestCase):

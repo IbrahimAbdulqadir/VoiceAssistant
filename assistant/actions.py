@@ -145,7 +145,19 @@ def _process_name_candidates(name: str) -> List[str]:
 def open_app(name: str) -> str:
     match = resolve_app_path(name)
     if not match:
-        msg = f"Couldn't find an app matching '{name}'."
+        # Not a known/installed app -- before giving up, this is also where a
+        # spoken "open <x>" for a folder or file (e.g. "open jumong" for a
+        # downloaded show's folder somewhere under the home directory) lands,
+        # since nothing about the phrasing distinguishes "open an app" from
+        # "open a folder/file" up front. Try the same whole-home-directory
+        # search open_vscode/open_folder already fall back to before refusing.
+        folder = _find_folder(name)
+        if folder is not None:
+            return open_folder(str(folder))
+        file = _find_file(name)
+        if file is not None:
+            return open_file(str(file))
+        msg = f"Couldn't find an app, folder, or file matching '{name}'."
         log.warning(msg)
         raise ActionError(msg)
 
@@ -185,6 +197,28 @@ def open_app(name: str) -> str:
         raise ActionError(msg)
 
 
+def _close_windows_by_title(name: str, confirm: ConfirmFn) -> Optional[str]:
+    """Closes matching window(s) via WM_CLOSE (not terminating any process) --
+    returns the result message, or None if no window matches at all. Shared by
+    both close_app branches: the "no process matches by name" case (Chrome PWAs
+    sharing chrome.exe with the whole browser) and the "every process match is
+    protected" case below (explorer.exe, where a spoken "close file explorer"
+    should close the one Explorer window meant, not refuse outright just
+    because the shared shell process itself can never be killed)."""
+    hwnds = _hwnds_for_title(name)
+    if not hwnds:
+        return None
+    if not VOICE_MODE and not confirm(f"Close {len(hwnds)} window(s) matching '{name}'?"):
+        msg = "Cancelled."
+        log.info("User declined to close: %s", name)
+        return msg
+    for hwnd in hwnds:
+        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+    msg = f"Closed {len(hwnds)} window(s) matching '{name}'."
+    log.info(msg)
+    return msg
+
+
 def close_app(name: str, confirm: ConfirmFn = _default_confirm) -> str:
     protected = config.protected_processes
     name_candidates = {c.strip().rstrip(".,!?;: ").lower() for c in _process_name_candidates(name)}
@@ -203,25 +237,26 @@ def close_app(name: str, confirm: ConfirmFn = _default_confirm) -> str:
         # entire browser. Closing the whole shared process would be wrong (it'd
         # kill every other Chrome window and tab too), so this closes just the
         # matching window(s) via WM_CLOSE instead of terminating a process.
-        hwnds = _hwnds_for_title(name)
-        if not hwnds:
+        result = _close_windows_by_title(name, confirm)
+        if result is None:
             msg = f"No running process or window matching '{name}'."
             log.info(msg)
             raise ActionError(msg)
-        if not VOICE_MODE and not confirm(f"Close {len(hwnds)} window(s) matching '{name}'?"):
-            msg = "Cancelled."
-            log.info("User declined to close: %s", name)
-            return msg
-        for hwnd in hwnds:
-            win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
-        msg = f"Closed {len(hwnds)} window(s) matching '{name}'."
-        log.info(msg)
-        return msg
+        return result
 
     blocked = [p for p in matches if (p.info.get("name") or "").lower() in protected]
     killable = [p for p in matches if p not in blocked]
 
     if blocked and not killable:
+        # Every process match is protected -- most commonly explorer.exe, which
+        # is both the one shared desktop-shell process *and* the host for every
+        # open Explorer window. Refusing outright here would make "close file
+        # explorer" / "close explorer" never work at all, even when (as is
+        # almost always the case) the user means one open window, not the
+        # shell -- try that before giving up.
+        result = _close_windows_by_title(name, confirm)
+        if result is not None:
+            return result
         msg = f"'{name}' matches a protected system process ({blocked[0].info['name']}); refusing to close it."
         log.warning(msg)
         raise ActionError(msg)
