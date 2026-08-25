@@ -135,6 +135,15 @@ class TestMinimizeAllWindows(unittest.TestCase):
             mock_dispatch.return_value.MinimizeAll.assert_called_once()
 
 
+class TestRefreshSystem(unittest.TestCase):
+    def test_forces_a_rescan_and_reports_count(self):
+        with patch("assistant.app_discovery.discover_apps") as mock_discover:
+            mock_discover.return_value = {"chrome": "C:/chrome.exe", "vlc": "C:/vlc.exe"}
+            msg = actions.refresh_system()
+            mock_discover.assert_called_once_with(force=True)
+            self.assertIn("2", msg)
+
+
 class TestOpenAppSearchFallback(unittest.TestCase):
     """'open jumong' etc. -- a name that isn't a known/installed app should fall
     back to a folder/file search instead of just refusing, since a spoken "open

@@ -179,6 +179,12 @@ TOOLS = [
     },
     {
         "type": "function",
+        "name": "refresh_system",
+        "description": "Re-scan Start Menu shortcuts and WindowsApps aliases so a just-installed app is recognized by name without restarting the assistant.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
         "name": "open_in_chrome",
         "description": "Open a URL, or a Google search, specifically in Chrome rather than the OS default browser.",
         "parameters": {
@@ -222,6 +228,7 @@ _DISPATCH = {
     "open_url": lambda url: actions.open_url(url),
     "run_script": lambda name: actions.run_script(name),
     "list_known_apps": lambda: actions.list_known_apps(),
+    "refresh_system": lambda: actions.refresh_system(),
     "open_in_chrome": lambda query_or_url: integrations.open_in_chrome(query_or_url),
     "spotify_play": lambda query: integrations.spotify_search(query),
     "gmail_search": lambda query=None: integrations.open_gmail(query),

@@ -1106,3 +1106,14 @@ def list_known_apps() -> str:
 
     names = sorted(set(discover_apps().keys()) | set(config.aliases.keys()))
     return "Known apps:\n" + "\n".join(f"  - {n}" for n in names) if names else "No apps known yet."
+
+
+def refresh_system() -> str:
+    """Re-scans Start Menu shortcuts + WindowsApps aliases so a just-installed app
+    is recognized by name without restarting the listener."""
+    from assistant.app_discovery import discover_apps
+
+    apps = discover_apps(force=True)
+    msg = f"Refreshed. Found {len(apps)} installed apps."
+    log.info(msg)
+    return msg

@@ -28,6 +28,13 @@ class TestIntentRouting(unittest.TestCase):
         execute("close spotify")
         mock_close.assert_called_once_with("spotify")
 
+    @patch("assistant.executor.actions.refresh_system", return_value="ok")
+    def test_refresh_system(self, mock_refresh):
+        for phrase in ["refresh system", "refresh the system", "rescan apps", "rescan for new apps", "rescan"]:
+            mock_refresh.reset_mock()
+            execute(phrase)
+            mock_refresh.assert_called_once_with()
+
     @patch("assistant.executor.actions.close_app")
     @patch("assistant.executor.actions.close_all_apps", return_value="ok")
     def test_close_all_beats_close_app_catchall(self, mock_close_all, mock_close_app):

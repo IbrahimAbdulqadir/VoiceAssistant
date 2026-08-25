@@ -58,6 +58,7 @@ HELP_TEXT = """Commands:
   open url <url>               - open a URL in the default browser
   run <script name>           - run a whitelisted script from config/apps.yaml
   list apps                   - list known/discoverable app names
+  refresh system / rescan apps - re-scan Start Menu/WindowsApps for newly installed apps
   help                        - show this message
   exit / quit                 - stop the assistant
 """
@@ -312,6 +313,11 @@ def _screen_off():
 @intent(r"^list apps$")
 def _list_apps():
     return actions.list_known_apps()
+
+
+@intent(r"^refresh(?:\s+the)?\s+system$|^re-?scan(?:\s+(?:for\s+)?(?:new\s+)?apps)?$")
+def _refresh_system():
+    return actions.refresh_system()
 
 
 @intent(r"^help$")
