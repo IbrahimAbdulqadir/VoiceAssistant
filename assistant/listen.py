@@ -20,6 +20,7 @@ set SHOW_INDICATOR=0 in config/.env to turn it off.
 import os
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import List, Optional
 
@@ -46,13 +47,27 @@ FRAME_SAMPLES = 480          # 30ms @ 16kHz -- matches openWakeWord VAD's recomm
 # Custom models trained on synthetic TTS-only data (no real ambient-noise negatives)
 # run a bit hotter than the pretrained built-ins -- override via WAKE_THRESHOLD in
 # config/.env if you're seeing false triggers on background noise/conversation.
-WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", "0.6"))
+# Raised from the original 0.6 as a stopgap: a survey of this project's own
+# wake-word log (884 real detections across several days) found real,
+# intentional triggers scoring 0.94-0.98, but also plenty of background-noise
+# false positives scoring as low as 0.56 -- 0.9 trims the weakest quarter of
+# those without touching the range real triggers actually land in. It does
+# NOT fix the worst false positives (many score 0.92-0.98, the same range as
+# genuine ones) -- that needs either the VAD gate below or retraining the
+# model with real ambient-noise negatives, not just threshold tuning.
+WAKE_THRESHOLD = float(os.environ.get("WAKE_THRESHOLD", "0.9"))
 # How long the model refuses to re-fire after a detection, regardless of score --
 # prevents the "keeps re-triggering on its own" loop. Comfortably longer than one
 # recording cycle's worth of residual audio context.
 WAKE_DEBOUNCE_SECONDS = float(os.environ.get("WAKE_DEBOUNCE_SECONDS", "3.0"))
 SILENCE_THRESHOLD = 0.4      # VAD probability below this counts as silence
 MIN_SPEECH_FRAMES = 17       # ~0.5s -- don't allow a cutoff before at least this much audio
+# How many recent frames of VAD history to require *some* real speech in before
+# honoring a wake-word detection at all -- rejects triggers that fire on pure
+# noise/silence (hum, a door, electrical interference) with no one actually
+# talking, without needing to touch WAKE_THRESHOLD. 20 frames = ~0.6s, enough
+# to cover saying the wake word itself plus a little lead-in.
+WAKE_VAD_GATE_FRAMES = 20
 # Seconds of continuous silence before ending the recording -- long enough to
 # survive a mid-command pause (thinking, a breath, an accent needing a moment to
 # form the words) without cutting the command off early. Defaults to 5s.
@@ -220,13 +235,21 @@ def _build_vocabulary_prompt() -> str:
     )
 
 
-def _process_command(audio, whisper_ready, whisper_holder, vocabulary_prompt, indicator=None, fast_text=None) -> None:
+def _process_command(
+    audio, whisper_ready, whisper_holder, vocabulary_prompt, indicator=None, fast_text=None, had_real_speech=True
+) -> None:
     """Transcribes (unless fast_text is already resolved by the fast lane) and
     executes one already-recorded command. Runs on its own background thread
     (see _listen_loop) so a slow or hung action -- a network call, an OAuth
     flow waiting on a browser that never completes, anything -- can never
     freeze wake-word detection. The indicator is already back to idle by the
-    time this runs; nothing here touches it."""
+    time this runs; nothing here touches it.
+
+    had_real_speech is False when the recording that triggered this had almost
+    no detected voice activity at all (see WAKE_VAD_GATE_FRAMES/MIN_SPEECH_FRAMES
+    in _listen_loop) -- i.e. the wake word fired on background noise and nobody
+    said anything. In that case an empty transcription stays silent instead of
+    speaking "I didn't catch that" to an empty room."""
     if not voiceprint.verify(audio):
         print("(voice not recognized -- ignoring)")
         log.info("Speaker verification failed; ignoring command")
@@ -262,7 +285,10 @@ def _process_command(audio, whisper_ready, whisper_holder, vocabulary_prompt, in
 
     if not text:
         print("(didn't catch anything)")
-        tts.speak_no_match()
+        if had_real_speech:
+            tts.speak_no_match()
+        else:
+            log.info("Empty transcription with no real speech detected -- staying silent")
         return
 
     print(f"> {text}")
@@ -379,10 +405,16 @@ def _listen_loop(indicator=None) -> None:
         finally:
             command_gate.release()
 
+    # Rolling window of recent VAD scores, fed continuously (not just during an
+    # active recording) so it's always warm by the time a wake-word trigger
+    # needs to check it -- see WAKE_VAD_GATE_FRAMES above.
+    recent_voice_scores: "deque[float]" = deque(maxlen=WAKE_VAD_GATE_FRAMES)
+
     try:
         with stream:
             while True:
                 frame = _read_frame()
+                recent_voice_scores.append(vad.predict(frame, frame_size=FRAME_SAMPLES))
                 # debounce_time stops the model from firing again on its own
                 # residual internal state for a few seconds after a detection --
                 # openWakeWord's own fix for "prevent multiple detections of the
@@ -391,6 +423,15 @@ def _listen_loop(indicator=None) -> None:
                     frame, threshold=all_thresholds, debounce_time=WAKE_DEBOUNCE_SECONDS
                 )
                 if prediction.get(keyword_name, 0.0) < WAKE_THRESHOLD:
+                    continue
+
+                if not any(s >= SILENCE_THRESHOLD for s in recent_voice_scores):
+                    log.info(
+                        "Wake word heard (score=%.2f) but no real speech in the preceding "
+                        "%.1fs -- treating as a false trigger on background noise",
+                        prediction.get(keyword_name, 0.0),
+                        len(recent_voice_scores) * FRAME_SAMPLES / SAMPLE_RATE,
+                    )
                     continue
 
                 if not command_gate.try_acquire():
@@ -485,6 +526,7 @@ def _listen_loop(indicator=None) -> None:
                     frames = frames[: len(frames) - (silence_run - silence_pad_frames)]
 
                 audio = np.concatenate(frames).astype(np.float32) / 32768.0
+                had_real_speech = fast_text is not None or speech_frames_seen >= MIN_SPEECH_FRAMES
 
                 # Transcription + execution run on their own thread so a slow or
                 # hung action (a network call, an OAuth flow stuck on a browser
@@ -492,7 +534,7 @@ def _listen_loop(indicator=None) -> None:
                 # detection -- the loop above keeps listening immediately.
                 threading.Thread(
                     target=_run_and_release,
-                    args=(audio, whisper_ready, whisper_holder, vocabulary_prompt, indicator, fast_text),
+                    args=(audio, whisper_ready, whisper_holder, vocabulary_prompt, indicator, fast_text, had_real_speech),
                     daemon=True,
                 ).start()
     except KeyboardInterrupt:
