@@ -35,7 +35,6 @@ FAILED_PHRASES = [
     "That didn't work, {name}.",
 ]
 
-_engine = None
 _lock = threading.Lock()
 
 
@@ -43,30 +42,38 @@ def _enabled() -> bool:
     return os.environ.get("SPEAK_RESPONSES", "1").lower() not in ("0", "false", "no")
 
 
-def _get_engine():
-    global _engine
-    if _engine is None:
-        import pyttsx3
-
-        _engine = pyttsx3.init()
-        rate = os.environ.get("TTS_RATE")
-        if rate:
-            _engine.setProperty("rate", int(rate))
-    return _engine
-
-
 def speak(text: str) -> None:
     """Speaks text synchronously. Blocking is fine here -- callers always run this
     on the background command thread (see listen.py's _process_command), never on
     the wake-word detection loop itself. Never raises: a broken TTS engine should
-    degrade to silence, not take the rest of the command handling down with it."""
+    degrade to silence, not take the rest of the command handling down with it.
+
+    Builds a fresh engine (and initializes COM) on *this* thread every call rather
+    than reusing one global engine across calls. pyttsx3's Windows driver is SAPI5
+    via COM, and COM apartment state is thread-local -- listen.py runs every
+    command on a freshly spawned thread, so an engine created on one thread hung
+    forever in runAndWait() when driven from the next command's thread. That
+    silently ate every spoken response (never raised, just never returned) until
+    listen.py's 60s command timeout abandoned it -- during which every wake word
+    heard in between was ignored as "still processing a previous command"."""
     if not _enabled() or not text:
         return
     try:
+        import pythoncom
+        import pyttsx3
+
         with _lock:
-            engine = _get_engine()
-            engine.say(text)
-            engine.runAndWait()
+            pythoncom.CoInitialize()
+            try:
+                engine = pyttsx3.init()
+                rate = os.environ.get("TTS_RATE")
+                if rate:
+                    engine.setProperty("rate", int(rate))
+                engine.say(text)
+                engine.runAndWait()
+                engine.stop()
+            finally:
+                pythoncom.CoUninitialize()
     except Exception:
         log.exception("Text-to-speech failed")
 
