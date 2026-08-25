@@ -45,7 +45,19 @@ def resolve_app_path(spoken_name: str) -> Optional[Tuple[str, str]]:
     match = process.extractOne(name, candidates.keys(), scorer=fuzz.WRatio)
     if match and match[1] >= FUZZY_THRESHOLD:
         matched_name = match[0]
-        log.debug("Fuzzy matched '%s' -> '%s' (score %.0f)", name, matched_name, match[1])
-        return matched_name, candidates[matched_name]
+        # WRatio's partial-ratio component scores any substring match as
+        # near-perfect, even one that lands in the middle of an unrelated word --
+        # "the password" scores 90 against the app "word" purely because
+        # "password" happens to contain "word", which is exactly what let a
+        # misheard fragment of background conversation (nobody said the wake
+        # word) open Microsoft Word. Requiring the match to also clear the bar on
+        # either plain character-ratio (keeps typo/merged-word matches like
+        # "vs code" -> "vscode") or whole-token-set ratio (keeps "google chrome"
+        # -> "chrome", "microsoft word" -> "word") rejects matches that only
+        # exist because of an accidental substring, without losing the fuzzy
+        # matches that are actually meant to work.
+        if fuzz.ratio(name, matched_name) >= FUZZY_THRESHOLD or fuzz.token_set_ratio(name, matched_name) >= FUZZY_THRESHOLD:
+            log.debug("Fuzzy matched '%s' -> '%s' (score %.0f)", name, matched_name, match[1])
+            return matched_name, candidates[matched_name]
 
     return None
