@@ -2,6 +2,48 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-25, even later) — Notepad opened on its own; wake word was picking up background conversation and the LLM fallback acted on it as a real command
+
+User restarted the listener (see entry below) and separately noticed Notepad
+had opened with no idea why. Root-caused from `logs/assistant.log`, not
+guessed:
+
+```
+12:05:31 Transcribed: 'Call in text and notepad. You want to go compromise.
+          You do not play chess there. Its better to be positive and active'
+12:05:37 LLM backend calling open_app({'name': 'notepad'})
+12:05:38 Opened notepad (...\WindowsApps\notepad.exe)
+```
+
+The wake word had triggered on nearby background conversation (reads like a
+chess discussion) that was never directed at the assistant at all. Whisper
+transcribed it into that garbled sentence, which happened to contain the
+word "notepad." No regex intent matched the full sentence, so it fell
+through to the LLM fallback (`assistant/llm_backend.py`) -- whose system
+prompt at the time just said "call the single most appropriate tool," with
+no instruction to recognize "this isn't actually a command" and decline. It
+picked "notepad" out of the noise and actually opened it. Other
+transcriptions in the same log window were clearly background chatter too
+(e.g. "Wait, do they teach campback opening for black"), just not ones that
+happened to contain a tool-matching word, so they didn't cause a visible
+action.
+
+Asked the user how to handle it (declining vs. a wake-word confidence check
+vs. leaving it) -- they chose declining. Fix: rewrote `SYSTEM_PROMPT` in
+`assistant/llm_backend.py` to explicitly frame the input as a wake-word
+voice transcription that may not have been directed at the assistant at
+all, and instruct it to only call a tool when the text plausibly reads as a
+direct imperative command ("open X" / "close Y" / "play Z"), not when it
+merely contains a word that resembles one inside a conversational or
+garbled sentence -- in that case it should respond with plain text instead
+of guessing. No unit test possible for the LLM's actual judgement (this
+backend calls the real OpenAI API and every existing test mocks
+`llm_backend.handle` entirely rather than exercising it); all 56 existing
+tests still pass unchanged. Worth relistening for whether this actually cuts
+down false-trigger actions in practice, and revisiting the wake-word/VAD
+false-positive rate itself (also visible in the same log window) if it
+doesn't.
+
 ## Follow-up session (2026-08-25, later) — user's design for the app-vs-folder ambiguity, and a stale running process explaining "still same issue"
 
 After the app-vs-folder fix below, user reported "still same issue" and
