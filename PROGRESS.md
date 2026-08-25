@@ -2,6 +2,37 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-25, later) — user's design for the app-vs-folder ambiguity, and a stale running process explaining "still same issue"
+
+After the app-vs-folder fix below, user reported "still same issue" and
+proposed the actual design going forward: when a name matches both an app/
+system thing and a file/folder, default to opening the app/system, and let
+the user force the folder explicitly by saying "open <x> in file explorer".
+
+Two things, verified separately rather than assumed:
+
+1. The default-to-app fix from the entry below *was* already correct --
+   re-verified live (`execute("open telegram")` -> `open_app`, unchanged).
+   The real reason it looked unfixed: `Get-CimInstance Win32_Process` showed
+   a `pythonw.exe main.py --listen` process (PID 5808) that had been running
+   since *before* today's fix was written -- Python doesn't hot-reload, so
+   the live assistant the user was actually talking to was still running
+   yesterday's code. Restarted it so today's fix takes effect; general
+   lesson for next time this comes up: always check for (and restart) a
+   stale long-running `--listen` process before assuming a code fix didn't
+   work.
+2. Implemented the user's explicit-override design for real, not just the
+   default: added an `"open <x> in file explorer"` / `"in explorer"` intent
+   in `assistant/executor.py`, registered ahead of both the named-location
+   intent and the app catch-all so it always wins when spoken, no matter
+   what `<x>` would otherwise resolve to. Delegates to `actions.open_folder`,
+   which already resolves named locations and falls back to a recursive
+   by-name search -- so this works for any name, not just the ones in
+   `_NAMED_LOCATIONS` (verified live: `"open jumong in file explorer"` ->
+   `open_folder("jumong")` even though "jumong" isn't a named location at
+   all). Documented in `HELP_TEXT`. 2 new tests (plain "in file explorer"
+   and the "in explorer" short form), all 56 tests pass.
+
 ## Follow-up session (2026-08-25) — "open telegram" opened Telegram Desktop's download folder instead of the app
 
 User: after the previous session's fixes landed, "open telegram" started

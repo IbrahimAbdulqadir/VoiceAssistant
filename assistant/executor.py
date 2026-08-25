@@ -49,6 +49,8 @@ HELP_TEXT = """Commands:
   open vscode [in <path>]     - open VS Code, optionally at a folder/file (searches
                                  your whole home folder if the exact path isn't given)
   open folder <path>          - open a folder in File Explorer (also searches by name)
+  open <x> in file explorer    - force opening <x>'s folder rather than launching it as
+                                 an app, for names that are both (e.g. "telegram")
   open file <name>             - open a file with its default app (searches for it)
   find file <name>             - report where a file lives without opening it
   open url <url>               - open a URL in the default browser
@@ -99,6 +101,20 @@ def _open_file_line(path: str, line: str):
 @intent(r"^open folder\s+(.+)$")
 def _open_folder(path: str):
     return actions.open_folder(path)
+
+
+# Explicit override for the app-vs-folder ambiguity below (e.g. "telegram" is
+# both an app and a _NAMED_LOCATIONS folder alias) -- "open <x> in file
+# explorer"/"in explorer" always means the folder, no matter what <x> also
+# happens to match, since saying "in file explorer" is the user spelling out
+# that intent themselves rather than leaving it to a default. Registered
+# ahead of both _open_named_location and the generic app catch-all so it
+# always wins when spoken. actions.open_folder already resolves named
+# locations and falls back to a recursive by-name search, so this covers any
+# folder name, not just the ones in _NAMED_LOCATIONS.
+@intent(r"^open\s+(.+?)\s+in\s+(?:the\s+)?(?:file\s+explorer|explorer)$")
+def _open_in_file_explorer(name: str):
+    return actions.open_folder(name)
 
 
 # "open downloads" / "open the desktop folder" etc. -- built from

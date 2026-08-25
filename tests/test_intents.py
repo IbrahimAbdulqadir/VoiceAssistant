@@ -33,6 +33,24 @@ class TestIntentRouting(unittest.TestCase):
         execute("open folder C:/Users/me/Documents")
         mock_folder.assert_called_once_with("C:/Users/me/Documents")
 
+    @patch("assistant.executor.actions.open_app", return_value="ok")
+    @patch("assistant.executor.actions.open_folder", return_value="ok")
+    def test_open_in_file_explorer_forces_folder_over_app(self, mock_folder, mock_open):
+        # Explicit override for the app-vs-folder ambiguity -- saying "in file
+        # explorer" should always win, regardless of whether "telegram" would
+        # otherwise resolve to the app (doesn't even need discover_apps
+        # mocked here: this must never reach that check at all).
+        execute("open telegram in file explorer")
+        mock_folder.assert_called_once_with("telegram")
+        mock_open.assert_not_called()
+
+    @patch("assistant.executor.actions.open_app", return_value="ok")
+    @patch("assistant.executor.actions.open_folder", return_value="ok")
+    def test_open_in_explorer_short_form(self, mock_folder, mock_open):
+        execute("open jumong in explorer")
+        mock_folder.assert_called_once_with("jumong")
+        mock_open.assert_not_called()
+
     @patch("assistant.executor.discover_apps", return_value={})
     @patch("assistant.executor.actions.open_folder", return_value="ok")
     def test_open_named_location_beats_catchall(self, mock_folder, mock_discover):
