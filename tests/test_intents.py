@@ -165,7 +165,7 @@ class TestIntentRouting(unittest.TestCase):
 
     @patch("assistant.executor.actions.screen_off", return_value="ok")
     def test_screen_off(self, mock_screen_off):
-        for phrase in ["turn off the screen", "screen off", "turn off display"]:
+        for phrase in ["turn off the screen", "screen off", "turn off display", "off screen", "off the screen"]:
             mock_screen_off.reset_mock()
             execute(phrase)
             mock_screen_off.assert_called_once_with()

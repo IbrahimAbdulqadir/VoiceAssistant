@@ -304,7 +304,7 @@ def _lock_screen():
     return actions.lock_screen()
 
 
-@intent(r"^(?:(?:turn|switch) off(?:\s+the)?\s+(?:screen|display|monitor)|(?:screen|display|monitor)\s+off)$")
+@intent(r"^(?:(?:turn|switch) off(?:\s+the)?\s+(?:screen|display|monitor)|(?:screen|display|monitor)\s+off|off\s+(?:the\s+)?(?:screen|display|monitor))$")
 def _screen_off():
     return actions.screen_off()
 

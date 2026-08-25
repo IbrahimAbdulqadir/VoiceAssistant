@@ -208,7 +208,15 @@ def _build_vocabulary_prompt() -> str:
     return (
         "Voice commands for a personal assistant. Examples: open " + ", open ".join(apps) + ". "
         "Close spotify. Play a song on spotify. Open vscode in a folder. "
-        "Open folder, open website, search mail for, open mail. Run script. List apps. Help."
+        "Open folder, open website, search mail for, open mail. Run script. List apps. Help. "
+        # Whisper weighs the prompt's *trailing* context most heavily, and without
+        # these phrases present anywhere it defaulted to nearest-sounding common
+        # English instead -- "shut down" kept coming back as "showdown"/"show
+        # down", never matching executor.py's shutdown regex. Listed last so they
+        # get the strongest bias.
+        "Shut down the system. Shut down my computer. Restart the computer. "
+        "Hibernate the computer. Lock the screen. Turn off the screen. Screen off. "
+        "Cancel the shutdown."
     )
 
 
