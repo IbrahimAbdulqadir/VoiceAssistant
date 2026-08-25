@@ -2,6 +2,45 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-25) — "open telegram" opened Telegram Desktop's download folder instead of the app
+
+User: after the previous session's fixes landed, "open telegram" started
+opening Telegram Desktop's download folder in File Explorer instead of
+launching the actual Telegram app. Flagged it as likely one of several
+"contradictions" between the folder/location handling and app-opening that
+hadn't surfaced yet.
+
+Root-caused against `assistant/executor.py` and `assistant/actions.py`:
+
+`actions._NAMED_LOCATIONS` (added in an earlier session so `find_file`/
+`play_video`/`create_folder` could scope to `"telegram"` meaning Telegram
+Desktop's download folder, without needing the full `"telegram desktop"`)
+also backs `executor._open_named_location`, the `"open <location>"` intent —
+and that intent is deliberately registered *ahead of* the generic `"open
+<x>"` app catch-all (so `"open downloads"` resolves straight to the folder).
+Since `"telegram"` is in both `_NAMED_LOCATIONS` (as a location alias) and is
+a real installed app, `"open telegram"` always matched the location intent
+first and never reached `open_app` at all — a structural conflict, not a typo,
+so it'll recur for any future named-location key that happens to also be a
+real app's name.
+
+Fix: `_open_named_location` now checks `app_discovery.discover_apps()` --
+genuinely discovered Start Menu/WindowsApps applications -- for the spoken
+name before falling back to `open_folder`, and calls `open_app` instead when
+it's a real app. Deliberately checks the *raw* `discover_apps()` dict, not
+the full alias-merged `resolve_app_path()`: `config/apps.yaml`'s own
+`downloads`/`documents` aliases (`"explorer.exe shell:Downloads"` etc., the
+pre-existing workaround this named-location intent was built to replace) are
+not real applications and must keep resolving to `open_folder`, confirmed by
+a regression test (`test_named_location_alias_only_in_apps_yaml_still_opens_folder`)
+that deliberately runs against the real (unmocked) `discover_apps()` rather
+than a stubbed-empty one. Verified live against the real machine: `"open
+telegram"` -> `open_app` (launches `Telegram.exe`), `"open telegram desktop"`
+-> `open_folder`, `"open downloads"`/`"open documents"` unaffected -> still
+`open_folder`, `"open spotify"` (not a named location at all) unaffected ->
+still `open_app`. All 54 tests pass (2 new: the app-vs-folder precedence
+case, and the apps.yaml-alias-isn't-a-real-app case).
+
 ## Follow-up session (2026-08-24, latest) — "close file explorer" refused forever + "open jumong" not recognized
 
 User reported two things after using the new open-folder/search behavior:

@@ -33,18 +33,21 @@ class TestIntentRouting(unittest.TestCase):
         execute("open folder C:/Users/me/Documents")
         mock_folder.assert_called_once_with("C:/Users/me/Documents")
 
+    @patch("assistant.executor.discover_apps", return_value={})
     @patch("assistant.executor.actions.open_folder", return_value="ok")
-    def test_open_named_location_beats_catchall(self, mock_folder):
+    def test_open_named_location_beats_catchall(self, mock_folder, mock_discover):
         execute("open downloads")
         mock_folder.assert_called_once_with("downloads")
 
+    @patch("assistant.executor.discover_apps", return_value={})
     @patch("assistant.executor.actions.open_folder", return_value="ok")
-    def test_open_named_location_with_folder_word(self, mock_folder):
+    def test_open_named_location_with_folder_word(self, mock_folder, mock_discover):
         execute("open the desktop folder")
         mock_folder.assert_called_once_with("desktop")
 
+    @patch("assistant.executor.discover_apps", return_value={})
     @patch("assistant.executor.actions.open_folder", return_value="ok")
-    def test_open_multiword_named_location(self, mock_folder):
+    def test_open_multiword_named_location(self, mock_folder, mock_discover):
         execute("open telegram desktop")
         mock_folder.assert_called_once_with("telegram desktop")
 
@@ -52,6 +55,30 @@ class TestIntentRouting(unittest.TestCase):
     def test_open_app_still_wins_for_non_location_names(self, mock_open):
         execute("open spotify")
         mock_open.assert_called_once_with("spotify")
+
+    @patch("assistant.executor.discover_apps", return_value={"telegram": "C:/Telegram.exe"})
+    @patch("assistant.executor.actions.open_app", return_value="ok")
+    @patch("assistant.executor.actions.open_folder", return_value="ok")
+    def test_named_location_that_is_also_an_app_opens_the_app(self, mock_folder, mock_open, mock_discover):
+        # "telegram" is both a _NAMED_LOCATIONS alias (Telegram Desktop's
+        # download folder) and a real installed app -- bare "open telegram"
+        # should launch the app, not open the download folder.
+        execute("open telegram")
+        mock_open.assert_called_once_with("telegram")
+        mock_folder.assert_not_called()
+
+    @patch("assistant.executor.actions.open_app", return_value="ok")
+    @patch("assistant.executor.actions.open_folder", return_value="ok")
+    def test_named_location_alias_only_in_apps_yaml_still_opens_folder(self, mock_folder, mock_open):
+        # "downloads"/"documents" are only resolvable as apps via the legacy
+        # config/apps.yaml `explorer.exe shell:...` alias, not a real
+        # discovered application -- that alias must not hijack this back to
+        # open_app (deliberately runs against the real discover_apps() here,
+        # not a mocked-empty one, since the whole point is that a real
+        # apps.yaml alias for "downloads" exists and still must not match).
+        execute("open downloads")
+        mock_folder.assert_called_once_with("downloads")
+        mock_open.assert_not_called()
 
     @patch("assistant.executor.actions.open_url", return_value="ok")
     def test_open_url_beats_catchall(self, mock_url):

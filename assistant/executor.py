@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Optional, Tuple
 
 from assistant import actions, integrations, llm_backend
+from assistant.app_discovery import discover_apps
 from assistant.intents import intent, match
 from assistant.logger import get_logger
 
@@ -115,6 +116,20 @@ _LOCATION_ALTERNATION = "|".join(re.escape(n) for n in _LOCATION_NAMES)
 
 @intent(rf"^open\s+(?:the\s+)?({_LOCATION_ALTERNATION})(?:\s+folder)?$")
 def _open_named_location(name: str):
+    # A named location's key can collide with a real installed app's name --
+    # "telegram" is both a _NAMED_LOCATIONS alias (Telegram Desktop's download
+    # folder, so "play <x> from telegram" doesn't need "telegram desktop"
+    # spelled out) and the actual Telegram app. Bare "open telegram" almost
+    # always means "launch the app", not "open its download folder", so check
+    # discover_apps() -- genuinely discovered Start Menu/WindowsApps
+    # applications -- and prefer that over the folder. This deliberately checks
+    # discover_apps() rather than the full alias-merged resolve_app_path(): the
+    # config/apps.yaml aliases for "downloads"/"documents"/etc. are themselves
+    # just `explorer.exe shell:...` folder-opening commands (the pre-existing
+    # workaround this named-location intent replaced), not real applications,
+    # so they must keep resolving to open_folder here, not open_app.
+    if name.strip().lower() in discover_apps():
+        return actions.open_app(name)
     return actions.open_folder(name)
 
 
