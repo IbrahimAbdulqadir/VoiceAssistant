@@ -2,6 +2,110 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-25, latest) — power management (shutdown/restart/hibernate/lock/screen-off) added, plus a duplicate-listener bug found from a screenshot
+
+User: "Spiderman can't shut down my system, hibernate, or do any of those power
+instructions -- fix that." Given how destructive/hard-to-reverse these are
+(and having just fixed a false-positive that opened Notepad from misheard
+background conversation), asked the user two design questions before writing
+anything: (1) shutdown/restart safety -- they chose no artificial delay, but
+cancellable; (2) trigger scope -- they described wanting "shut down system",
+"shut down laptop", "hibernate", and separately wanting to wake the screen
+back up by voice when it's off. Checked the actual power plan
+(`powercfg /query`) before assuming anything: AC never auto-sleeps/turns off
+the display already; DC sleeps after 30 min. Flagged the real hard
+constraint -- real Windows Sleep (S3) suspends this process along with
+everything else, so no software wake-word listener (this one included) can
+ever wake a truly sleeping machine, only a physical key/button press can.
+Asked a follow-up and the user confirmed: "screen off" should mean turning
+off just the display (not real Sleep), woken back up automatically by saying
+the wake word; also add lock and restart alongside shutdown/hibernate.
+
+Implemented in `assistant/actions.py`:
+- `shutdown_system()` / `restart_system()` -- `shutdown /s /t 0` /
+  `shutdown /r /t 0`, no artificial delay per the user's choice. `shutdown /a`
+  (`cancel_shutdown()`) can still abort one, but with t=0 that window is
+  genuinely narrow (documented in the module comment, not oversold).
+- `hibernate_system()` -- `shutdown /h`; noted in its docstring that unlike
+  shutdown/restart there's no delayed/cancellable form, and hibernating
+  suspends this process too, so (like real Sleep) it can't be voice-woken
+  either, only a physical press.
+- `lock_screen()` -- `ctypes.windll.user32.LockWorkStation()`.
+- `screen_off()` -- `SC_MONITORPOWER` via `WM_SYSCOMMAND` to `HWND_BROADCAST`,
+  turns off just the monitor, not real sleep.
+- `wake_display()` -- the same message with value -1 (undocumented by
+  Microsoft but universally used) to turn the monitor back on; wired into
+  `listen.py`'s wake-word-detected branch so it fires on *every* wake word,
+  making screen_off() reversible by voice without a dedicated command for it.
+
+All of these are registered in `executor.py` as tight, exact-phrase regexes
+only (`"shut down"` / `"shutdown the computer"` / `"restart the pc"` /
+`"hibernate"` / `"lock my computer"` / `"screen off"` / etc.) and deliberately
+**not** added to `llm_backend.TOOLS` at all -- per the trigger-scope decision,
+these must never be reachable the way Notepad got opened from a rambling
+misheard sentence that merely happened to contain a matching word. Confirmed
+with a regression test that a sentence merely containing "shut down" (not an
+exact command) falls through to the LLM fallback instead of triggering
+anything. 21 new tests across `test_actions.py`/`test_intents.py` (subprocess
+always mocked -- nothing here was ever allowed to actually run for real
+during testing), all 77 tests pass.
+
+## Follow-up session (2026-08-25, later still) — screenshot showed the on-screen indicator glitching (stuck between listening/idle, covered by other windows) -- root-caused to a duplicate listener process, not the indicator itself
+
+User: "check screenshot, why is listening and resting at the same time, also
+tabs and apps are overlaying it." No image was attached in-conversation --
+found it by checking the OS clipboard (`Get-Clipboard`/`[Windows.Forms.
+Clipboard]::GetImage()`), which had a recent screenshot of the on-screen
+indicator (a red spider-web icon) over a blurred desktop.
+
+Root-caused with `Get-CimInstance Win32_Process`, not guessed: **two**
+`pythonw.exe main.py --listen` processes were running simultaneously, each
+with its own indicator window fighting the other for the same screen corner
+and topmost status -- that's what looked like "listening and resting at the
+same time" (each process's indicator independently toggling between idle/
+active) and windows covering it (z-order fights between two indicator
+windows, not the indicator losing topmost to a normal app). Traced where the
+second process came from: `Get-ScheduledTask` found a `VoiceAssistantListener`
+task with a 5-minute repeating trigger (`Interval: PT5M`, running
+indefinitely since 2026-08-22) acting as a watchdog that relaunches the
+listener if it ever stops. Its own `MultipleInstances: IgnoreNew` duplicate
+guard only tracks instances *Task Scheduler itself* launched -- it has no way
+to know about ones started any other way, including this session's own
+manual `Stop-Process`/relaunch cycles while iterating on earlier fixes today,
+so every one of those manual restarts left the next 5-minute tick free to
+spawn a genuine duplicate alongside it.
+
+Fix: added a real single-instance guard in `assistant/listen.py` --
+`_acquire_single_instance_lock()` creates a named Windows mutex
+(`VoiceAssistantListener_SingleInstance`) as the very first thing `run()`
+does, before any model loading or microphone access; if
+`win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS`, this process logs
+it and exits immediately instead of running a duplicate. A named mutex, not a
+PID file, since Windows releases it automatically the instant a process
+exits for any reason (crash included) -- no stale-lock cleanup to get wrong.
+This is launcher-agnostic (works the same whether started by Task Scheduler,
+`run_listen.bat`, a debugger, or a manual restart) and combines with the
+existing 5-minute trigger to form an actual working watchdog: a crashed
+listener gets relaunched within 5 minutes (trigger fires, mutex is free, new
+instance starts normally); a healthy one just no-ops the redundant launch
+attempt instead of duplicating. Verified for real against two live
+processes, not just unit-mocked: a worker script confirmed a second process
+racing for the same mutex name correctly fails to acquire it while the first
+(or in this case, the *real* listener the 5-minute trigger had already
+restarted with the new code mid-session) holds it.
+
+Also fixed a related, previously-unnoticed bug in `assistant/indicator.py`
+while investigating: `TOPMOST_REASSERT_SECONDS = 30` meant "-topmost" was
+only re-forced for the first 30 seconds after the indicator window was
+created, on the theory that it was purely an early-boot DWM race. But normal
+windows (browser tabs, other apps) can knock a topmost window down the
+z-order any time they're brought to the foreground, not just at startup --
+so the first time that happened after the 30-second window expired, in a
+session that's normally meant to run for hours or days, the indicator stayed
+permanently covered for the rest of the session. Removed the cutoff entirely;
+it now reasserts topmost every second for the indicator's whole lifetime
+(cheap enough that there's no real cost to not having one).
+
 ## Follow-up session (2026-08-25, even later) — Notepad opened on its own; wake word was picking up background conversation and the LLM fallback acted on it as a real command
 
 User restarted the listener (see entry below) and separately noticed Notepad

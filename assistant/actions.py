@@ -7,6 +7,7 @@ Each action returns a plain string result message rather than printing, so both 
 CLI and (later) a voice/TTS front-end can consume the same functions.
 """
 
+import ctypes
 import os
 import re
 import shlex
@@ -360,6 +361,126 @@ def media_previous() -> str:
     msg = "Went back to previous track."
     log.info(msg)
     return msg
+
+
+# --- Power management ---
+#
+# These are the most destructive actions in the whole module -- shutdown/restart
+# tear down every running app and end the session outright, and none of them can
+# be caught by the wake-word/LLM-fallback false-positive class fixed elsewhere
+# (a misheard background conversation opening Notepad) because these are
+# deliberately *not* registered as LLM tools at all (see llm_backend.py) --
+# they're only reachable through executor.py's tight, exact-phrase regexes, so a
+# stray word inside a rambling misheard sentence can never trigger one.
+#
+# Per the user's explicit choice: no artificial delay before shutdown/restart
+# (shutdown /t 0, not a countdown) -- but shutdown /a can still cancel it, since
+# Windows takes a brief moment closing sessions/apps even at t=0. That recovery
+# window is real but genuinely narrow; there's no way to widen it without adding
+# the delay that was explicitly declined.
+
+
+def shutdown_system(confirm: ConfirmFn = _default_confirm) -> str:
+    if not VOICE_MODE and not confirm("Shut down the computer now?"):
+        msg = "Cancelled."
+        log.info("User declined to shut down.")
+        return msg
+    try:
+        subprocess.run(["shutdown", "/s", "/t", "0"], check=True)
+    except Exception as e:
+        msg = f"Failed to shut down: {e}"
+        log.error(msg)
+        raise ActionError(msg)
+    msg = "Shutting down."
+    log.info(msg)
+    return msg
+
+
+def restart_system(confirm: ConfirmFn = _default_confirm) -> str:
+    if not VOICE_MODE and not confirm("Restart the computer now?"):
+        msg = "Cancelled."
+        log.info("User declined to restart.")
+        return msg
+    try:
+        subprocess.run(["shutdown", "/r", "/t", "0"], check=True)
+    except Exception as e:
+        msg = f"Failed to restart: {e}"
+        log.error(msg)
+        raise ActionError(msg)
+    msg = "Restarting."
+    log.info(msg)
+    return msg
+
+
+def cancel_shutdown() -> str:
+    """Aborts a pending shutdown/restart (shutdown /a) -- the only recovery once
+    one of the above has been triggered. Whether this actually catches it in time
+    depends entirely on how quickly it's said, since shutdown/restart run with no
+    delay (see module comment above)."""
+    try:
+        subprocess.run(["shutdown", "/a"], check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        msg = "No shutdown or restart is currently pending to cancel."
+        log.info(msg)
+        raise ActionError(msg)
+    except Exception as e:
+        msg = f"Failed to cancel: {e}"
+        log.error(msg)
+        raise ActionError(msg)
+    msg = "Cancelled the pending shutdown/restart."
+    log.info(msg)
+    return msg
+
+
+def hibernate_system(confirm: ConfirmFn = _default_confirm) -> str:
+    # Unlike shutdown/restart, Windows has no delayed/cancellable form of
+    # hibernate (shutdown /h takes no /t) -- and hibernating suspends this
+    # process along with everything else, so (like real Sleep) it can't be
+    # woken back up by voice either, only a physical key/button press.
+    if not VOICE_MODE and not confirm("Hibernate the computer now?"):
+        msg = "Cancelled."
+        log.info("User declined to hibernate.")
+        return msg
+    try:
+        subprocess.run(["shutdown", "/h"], check=True)
+    except Exception as e:
+        msg = f"Failed to hibernate: {e}"
+        log.error(msg)
+        raise ActionError(msg)
+    msg = "Hibernating."
+    log.info(msg)
+    return msg
+
+
+def lock_screen() -> str:
+    ctypes.windll.user32.LockWorkStation()
+    msg = "Locked the screen."
+    log.info(msg)
+    return msg
+
+
+def screen_off() -> str:
+    """Turns off just the display, not real Sleep -- the assistant (and
+    everything else) keeps running normally, so it can still hear the wake word
+    and turn the display back on via wake_display(), which listen.py calls on
+    every wake-word detection. Real Sleep suspends this process too, which would
+    make voice-waking impossible -- that's a hard OS/hardware limitation, not
+    something this can work around, so this is the only way "screen off, wake it
+    with my voice" is actually achievable."""
+    win32gui.SendMessage(win32con.HWND_BROADCAST, win32con.WM_SYSCOMMAND, win32con.SC_MONITORPOWER, 2)
+    msg = "Turned off the screen."
+    log.info(msg)
+    return msg
+
+
+def wake_display() -> None:
+    """Turns the display back on -- called by listen.py on every wake-word
+    detection (not exposed as its own voice command) so screen_off() above can
+    always be undone just by saying the wake word again. -1 ("on") isn't an
+    officially documented SC_MONITORPOWER value (Microsoft only documents 1 and
+    2), but it's the universally-used way to turn the monitor back on and works
+    reliably in practice. A no-op (harmless) when the display is already on."""
+    win32gui.SendMessage(win32con.HWND_BROADCAST, win32con.WM_SYSCOMMAND, win32con.SC_MONITORPOWER, -1)
 
 
 def minimize_app(name: str) -> str:

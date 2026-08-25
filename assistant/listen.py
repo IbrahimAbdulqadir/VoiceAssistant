@@ -23,7 +23,11 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from assistant import tts, voiceprint
+import win32api
+import win32event
+import winerror
+
+from assistant import actions, tts, voiceprint
 from assistant.executor import ExecStatus, execute_with_status
 from assistant.logger import get_logger
 
@@ -95,6 +99,31 @@ FAST_LANE_THRESHOLD = float(os.environ.get("FAST_LANE_THRESHOLD", "0.85"))
 # until the process was killed and restarted by hand. This bounds that outage
 # to COMMAND_TIMEOUT_SECONDS instead of leaving it permanent.
 COMMAND_TIMEOUT_SECONDS = float(os.environ.get("COMMAND_TIMEOUT_SECONDS", "60"))
+
+# Guards against a second --listen process ever running alongside this one.
+# The VoiceAssistantListener scheduled task re-triggers main.py --listen every
+# 5 minutes as a watchdog (so a crashed listener comes back on its own), and
+# its own "IgnoreNew" duplicate guard stops it from double-launching -- but
+# only for instances *it* started. It has no way to know about one started any
+# other way (a manual restart, a debugger, run_listen.bat), so without this,
+# any of those produces a real second process: double the wake word, audio
+# capture, and on-screen indicator, each fighting the other for the mic and
+# for topmost/screen position (symptom actually seen: the indicator flickering
+# between idle and active and getting covered by other windows). A named
+# Windows mutex, not a PID file -- Windows releases it the instant this
+# process exits for any reason, crash included, so there's no stale-lock state
+# to ever clean up by hand.
+_SINGLE_INSTANCE_MUTEX_NAME = "VoiceAssistantListener_SingleInstance"
+_single_instance_mutex = None
+
+
+def _acquire_single_instance_lock() -> bool:
+    """True if this is the only --listen process running; False if another one
+    already holds the lock, meaning this process should exit immediately
+    without loading any models or touching the microphone."""
+    global _single_instance_mutex
+    _single_instance_mutex = win32event.CreateMutex(None, False, _SINGLE_INSTANCE_MUTEX_NAME)
+    return win32api.GetLastError() != winerror.ERROR_ALREADY_EXISTS
 
 
 class _CommandGate:
@@ -366,6 +395,12 @@ def _listen_loop(indicator=None) -> None:
 
                 print("Wake word detected -- listening for your command...")
                 log.info("Wake word detected (score=%.2f)", prediction.get(keyword_name, 0.0))
+                # Undoes actions.screen_off() -- turning off just the display (not
+                # real Sleep) only works as a "wake it with my voice" feature if
+                # every wake-word detection also turns the display back on, so
+                # this runs unconditionally rather than only when a "screen off"
+                # was actually issued. Harmless no-op when the display is already on.
+                actions.wake_display()
                 if indicator is not None:
                     indicator.activate()
                 recording_start = time.monotonic()
@@ -457,6 +492,11 @@ def _listen_loop(indicator=None) -> None:
 
 
 def run() -> None:
+    if not _acquire_single_instance_lock():
+        log.warning("Another --listen process is already running -- exiting instead of running a duplicate.")
+        print("Voice assistant is already running -- exiting.")
+        return
+
     if not _show_indicator():
         _listen_loop()
         return

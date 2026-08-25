@@ -108,6 +108,61 @@ class TestIntentRouting(unittest.TestCase):
         execute("run backup")
         mock_run.assert_called_once_with("backup")
 
+    @patch("assistant.executor.actions.shutdown_system", return_value="ok")
+    def test_shutdown_bare(self, mock_shutdown):
+        execute("shut down")
+        mock_shutdown.assert_called_once_with()
+
+    @patch("assistant.executor.actions.shutdown_system", return_value="ok")
+    def test_shutdown_with_target_phrasing(self, mock_shutdown):
+        for phrase in ["shutdown the computer", "shut down my laptop", "shut down system", "power off"]:
+            mock_shutdown.reset_mock()
+            execute(phrase)
+            mock_shutdown.assert_called_once_with()
+
+    @patch("assistant.executor.actions.restart_system", return_value="ok")
+    def test_restart(self, mock_restart):
+        execute("restart the pc")
+        mock_restart.assert_called_once_with()
+
+    @patch("assistant.executor.actions.hibernate_system", return_value="ok")
+    def test_hibernate(self, mock_hibernate):
+        execute("hibernate")
+        mock_hibernate.assert_called_once_with()
+
+    @patch("assistant.executor.actions.cancel_shutdown", return_value="ok")
+    def test_cancel_shutdown(self, mock_cancel):
+        execute("cancel shutdown")
+        mock_cancel.assert_called_once_with()
+
+    @patch("assistant.executor.actions.cancel_shutdown", return_value="ok")
+    def test_abort_restart(self, mock_cancel):
+        execute("abort restart")
+        mock_cancel.assert_called_once_with()
+
+    @patch("assistant.executor.actions.lock_screen", return_value="ok")
+    def test_lock_screen(self, mock_lock):
+        execute("lock my computer")
+        mock_lock.assert_called_once_with()
+
+    @patch("assistant.executor.actions.screen_off", return_value="ok")
+    def test_screen_off(self, mock_screen_off):
+        for phrase in ["turn off the screen", "screen off", "turn off display"]:
+            mock_screen_off.reset_mock()
+            execute(phrase)
+            mock_screen_off.assert_called_once_with()
+
+    @patch("assistant.executor.actions.shutdown_system")
+    @patch("assistant.executor.llm_backend.handle", return_value=None)
+    def test_shutdown_mention_in_a_sentence_does_not_trigger_it(self, mock_llm, mock_shutdown):
+        # Power actions must only ever be reachable through the tight regexes
+        # above, not matched loosely -- a sentence that merely contains "shut
+        # down" (not a bare/exact command) must fall straight through to the
+        # LLM fallback instead of resolving to a real power action.
+        execute("I was thinking we should shut down that old project soon")
+        mock_llm.assert_called_once()
+        mock_shutdown.assert_not_called()
+
     @patch("assistant.executor.integrations.open_in_chrome", return_value="ok")
     def test_open_in_chrome_beats_catchall(self, mock_chrome):
         execute("open github.com in chrome")

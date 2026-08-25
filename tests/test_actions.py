@@ -108,6 +108,83 @@ class TestRunScript(unittest.TestCase):
         self.assertIn("whitelisted", str(ctx.exception).lower())
 
 
+class TestPowerManagement(unittest.TestCase):
+    """Never let these actually run shutdown/restart/hibernate for real --
+    subprocess.run is mocked in every case."""
+
+    @patch("assistant.actions.subprocess.run")
+    def test_shutdown_declined_does_not_run(self, mock_run):
+        result = actions.shutdown_system(confirm=lambda p: False)
+        mock_run.assert_not_called()
+        self.assertEqual(result, "Cancelled.")
+
+    @patch("assistant.actions.subprocess.run")
+    def test_shutdown_confirmed_runs_with_no_delay(self, mock_run):
+        actions.shutdown_system(confirm=lambda p: True)
+        mock_run.assert_called_once_with(["shutdown", "/s", "/t", "0"], check=True)
+
+    @patch("assistant.actions.subprocess.run")
+    def test_shutdown_in_voice_mode_skips_confirmation(self, mock_run):
+        # Voice mode has no stdin to answer a confirm prompt with -- same
+        # convention as close_app/run_script.
+        with patch("assistant.actions.VOICE_MODE", True):
+            actions.shutdown_system()
+        mock_run.assert_called_once_with(["shutdown", "/s", "/t", "0"], check=True)
+
+    @patch("assistant.actions.subprocess.run")
+    def test_restart_confirmed_runs_with_no_delay(self, mock_run):
+        actions.restart_system(confirm=lambda p: True)
+        mock_run.assert_called_once_with(["shutdown", "/r", "/t", "0"], check=True)
+
+    @patch("assistant.actions.subprocess.run")
+    def test_restart_declined_does_not_run(self, mock_run):
+        result = actions.restart_system(confirm=lambda p: False)
+        mock_run.assert_not_called()
+        self.assertEqual(result, "Cancelled.")
+
+    @patch("assistant.actions.subprocess.run")
+    def test_hibernate_confirmed_runs(self, mock_run):
+        actions.hibernate_system(confirm=lambda p: True)
+        mock_run.assert_called_once_with(["shutdown", "/h"], check=True)
+
+    @patch("assistant.actions.subprocess.run")
+    def test_hibernate_declined_does_not_run(self, mock_run):
+        result = actions.hibernate_system(confirm=lambda p: False)
+        mock_run.assert_not_called()
+        self.assertEqual(result, "Cancelled.")
+
+    @patch("assistant.actions.subprocess.run")
+    def test_cancel_shutdown_success(self, mock_run):
+        result = actions.cancel_shutdown()
+        mock_run.assert_called_once_with(["shutdown", "/a"], check=True, capture_output=True)
+        self.assertIn("Cancelled", result)
+
+    @patch("assistant.actions.subprocess.run", side_effect=actions.subprocess.CalledProcessError(1, "shutdown"))
+    def test_cancel_shutdown_when_nothing_pending(self, mock_run):
+        with self.assertRaises(actions.ActionError) as ctx:
+            actions.cancel_shutdown()
+        self.assertIn("No shutdown or restart", str(ctx.exception))
+
+    @patch("assistant.actions.ctypes.windll.user32.LockWorkStation")
+    def test_lock_screen(self, mock_lock):
+        actions.lock_screen()
+        mock_lock.assert_called_once()
+
+    @patch("assistant.actions.win32gui.SendMessage")
+    def test_screen_off_sends_monitor_off(self, mock_send):
+        actions.screen_off()
+        mock_send.assert_called_once_with(
+            actions.win32con.HWND_BROADCAST, actions.win32con.WM_SYSCOMMAND, actions.win32con.SC_MONITORPOWER, 2
+        )
+
+    @patch("assistant.actions.win32gui.SendMessage")
+    def test_wake_display_sends_monitor_on(self, mock_send):
+        actions.wake_display()
+        mock_send.assert_called_once_with(
+            actions.win32con.HWND_BROADCAST, actions.win32con.WM_SYSCOMMAND, actions.win32con.SC_MONITORPOWER, -1
+        )
+
+
 class TestCreateFile(unittest.TestCase):
     def test_defaults_to_txt_extension(self):
         with tempfile.TemporaryDirectory() as tmp:

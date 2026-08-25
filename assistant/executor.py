@@ -259,6 +259,41 @@ def _media_previous():
     return actions.media_previous()
 
 
+# --- Power management: deliberately tight, exact-phrase regexes only, never
+# exposed to llm_backend's free-form tool set. These are the most destructive
+# actions the assistant can take, so they must never be reachable the way
+# Notepad got opened from a misheard background conversation -- only a full
+# utterance that's exactly one of these phrases can trigger one.
+@intent(r"^(?:cancel|abort)\s+(?:the\s+)?(?:shutdown|restart)$")
+def _cancel_shutdown():
+    return actions.cancel_shutdown()
+
+
+@intent(r"^(?:shut ?down|power off)(?:\s+(?:the\s+|my\s+)?(?:computer|pc|laptop|system))?$")
+def _shutdown():
+    return actions.shutdown_system()
+
+
+@intent(r"^restart(?:\s+(?:the\s+|my\s+)?(?:computer|pc|laptop|system))?$")
+def _restart():
+    return actions.restart_system()
+
+
+@intent(r"^hibernate(?:\s+(?:the\s+|my\s+)?(?:computer|pc|laptop|system))?$")
+def _hibernate():
+    return actions.hibernate_system()
+
+
+@intent(r"^lock(?:\s+(?:the\s+|my\s+)?(?:screen|computer|pc|laptop))?$")
+def _lock_screen():
+    return actions.lock_screen()
+
+
+@intent(r"^(?:(?:turn|switch) off(?:\s+the)?\s+(?:screen|display|monitor)|(?:screen|display|monitor)\s+off)$")
+def _screen_off():
+    return actions.screen_off()
+
+
 @intent(r"^list apps$")
 def _list_apps():
     return actions.list_known_apps()

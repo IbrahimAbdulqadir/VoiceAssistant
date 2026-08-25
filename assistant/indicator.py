@@ -38,16 +38,24 @@ POLL_MS = 50
 
 CORNER_MARGIN = 24
 
-# How long after creation to keep re-forcing the window topmost/raised. A single
-# "-topmost" attribute set at creation can silently fail to actually take visible
-# effect on Windows if DWM/explorer.exe hasn't fully finished starting yet (the
-# same early-boot race already worked around elsewhere with sleep delays) -- the
-# window exists and is topmost as far as Tkinter is concerned, but doesn't actually
-# render above the desktop until something else forces Windows to recompute the
-# z-order. Observed symptom: the icon staying invisible after a restart until an
-# unrelated window (e.g. VS Code) was opened. Reasserting periodically for a while
-# is cheap insurance against that instead of a guess at the "right" one-time delay.
-TOPMOST_REASSERT_SECONDS = 30
+# How often to keep re-forcing the window topmost/raised, for as long as the
+# indicator runs (which is normally the whole session -- hours or days, not just
+# right after startup). A single "-topmost" attribute set at creation can
+# silently fail to actually take visible effect on Windows if DWM/explorer.exe
+# hasn't fully finished starting yet (the same early-boot race already worked
+# around elsewhere with sleep delays) -- the window exists and is topmost as far
+# as Tkinter is concerned, but doesn't actually render above the desktop until
+# something else forces Windows to recompute the z-order. Observed symptom: the
+# icon staying invisible after a restart until an unrelated window (e.g. VS
+# Code) was opened. This used to only reassert for the first 30 seconds after
+# creation on the theory that it was purely an early-boot race -- but regular
+# windows (browser tabs, other apps) can and do knock a topmost window down the
+# z-order later too, any time they're brought to the foreground, which isn't
+# specific to startup at all. A one-off 30-second window left the indicator
+# permanently covered for the rest of the session the first time that happened
+# after it expired, so this now reasserts for as long as the indicator runs --
+# a Tk attribute set + lift() every second is cheap enough that there's no real
+# cost to just not having a cutoff.
 TOPMOST_REASSERT_EVERY_MS = 1000
 
 
@@ -61,7 +69,6 @@ class WakeIndicator:
         self._radius = IDLE_RADIUS
         self._color = IDLE_COLOR
         self._is_active = False
-        self._topmost_reassert_until = 0.0
         self._last_topmost_reassert = 0.0
 
     def activate(self) -> None:
@@ -107,7 +114,6 @@ class WakeIndicator:
         self._root = root
         self._canvas = canvas
         self._draw()
-        self._topmost_reassert_until = time.monotonic() + TOPMOST_REASSERT_SECONDS
         root.after(POLL_MS, self._poll)
 
         try:
@@ -144,7 +150,7 @@ class WakeIndicator:
             self._draw()
 
         now = time.monotonic()
-        if now < self._topmost_reassert_until and now - self._last_topmost_reassert >= TOPMOST_REASSERT_EVERY_MS / 1000:
+        if now - self._last_topmost_reassert >= TOPMOST_REASSERT_EVERY_MS / 1000:
             self._last_topmost_reassert = now
             self._root.attributes("-topmost", True)
             self._root.lift()
