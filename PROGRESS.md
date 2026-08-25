@@ -2,6 +2,61 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-25, most recent) — "close/minimize all apps" added; the just-added wake_display() was actually freezing the listener on every wake word
+
+User: "I want it to be able to minimize and close all apps ... also learn to
+just restart after a fix, I have been calling Spiderman now it is not
+responding." Two things:
+
+1. **Added `close_all_apps()` / `minimize_all_windows()`** (`assistant/
+   actions.py`, registered in `executor.py` ahead of the single-app
+   `close <x>`/`minimize <x>` catch-alls so "close all"/"minimize everything"
+   don't get parsed as an app literally named "all"). `close_all_apps` closes
+   every open window via `WM_CLOSE` (not `TerminateProcess`) so each app gets
+   the same chance to prompt "save changes?" that Alt+F4 would -- the blast
+   radius here is every unsaved document in every open app at once, not just
+   one target, so a graceful close is the safer default. Skips
+   `config.protected_processes` (already covers `explorer.exe` and this
+   assistant's own `python.exe`/`pythonw.exe`). `minimize_all_windows` uses
+   Shell.Application's `MinimizeAll()`, not `ToggleDesktop()` (already used by
+   `show_desktop()`) -- `MinimizeAll` always minimizes, where `ToggleDesktop`
+   would restore everything if called a second time.
+
+2. **"Not responding" was a real, live hang -- and it was this session's own
+   bug from two exchanges ago.** Checked the actual running process before
+   guessing: `Get-Process -Id <pid> | Select CPU` twice, 3 seconds apart,
+   showed CPU time frozen (44.67 -> 44.69), and `logs/assistant.log`'s last
+   line was `"Wake word detected"` with nothing after it for 2+ minutes --
+   the audio thread was genuinely stuck, not just slow. Root cause:
+   `wake_display()` (added in the previous entry, wired into *every*
+   wake-word detection so `screen_off()` could be undone by voice) used
+   `win32gui.SendMessage(HWND_BROADCAST, ...)` -- `SendMessage` to
+   `HWND_BROADCAST` is synchronous and blocks until *every* top-level window
+   on the system finishes handling the message, so one slow/unresponsive
+   window anywhere on the machine freezes the caller. Sitting directly in the
+   wake-word-detected path, on the same thread that reads audio frames, that
+   froze the entire listener the instant the wake word fired. Fixed by
+   switching both `screen_off()` and `wake_display()` to `PostMessage`
+   (queues and returns immediately) -- the existing `_close_windows_by_title`
+   already used `PostMessage` for exactly this reason; the new code should
+   have followed that same precedent from the start and didn't. Lesson: any
+   future `win32gui`/`win32api` call added to a path that runs per wake-word
+   detection needs the same scrutiny -- broadcast/synchronous Win32 calls on
+   that thread can silently take the whole assistant down with no exception
+   and no error in the log, just silence.
+
+3. User also said, plainly: "learn to just restart after a fix." Saved as a
+   standing instruction (see auto-memory) -- going forward, restart the
+   listener as part of finishing a fix in this project, not as a separate
+   step the user has to ask for.
+
+All 83 tests pass (6 new: close_all_apps closing non-protected windows while
+skipping protected ones, no-windows and declined-confirmation cases,
+minimize_all_windows calling MinimizeAll not ToggleDesktop, and executor
+routing tests confirming "close/minimize all" beats the single-app
+catch-alls). Listener restarted after this fix (see auto-memory entry above
+for why that's now automatic).
+
 ## Follow-up session (2026-08-25, latest) — power management (shutdown/restart/hibernate/lock/screen-off) added, plus a duplicate-listener bug found from a screenshot
 
 User: "Spiderman can't shut down my system, hibernate, or do any of those power

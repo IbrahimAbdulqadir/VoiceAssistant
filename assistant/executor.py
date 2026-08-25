@@ -30,7 +30,9 @@ class ExecStatus(Enum):
 HELP_TEXT = """Commands:
   open <app>                  - launch an app (e.g. "open chrome")
   close <app>                 - close a running app (asks for confirmation)
+  close all / close everything - close every open app window (asks for confirmation)
   minimize <app>               - minimize a running app's window
+  minimize all / minimize everything - minimize every open window
   create folder <name> in <location> - create a folder (e.g. "create a folder called spiderman in downloads")
   create file <name> in <location> - create a file (e.g. "create a file called notes in downloads")
   play <video> on vlc [from <location>] - find and play a video file in VLC
@@ -202,6 +204,19 @@ def _open_url(url: str):
 @intent(r"^(?:run|execute)\s+(.+)$")
 def _run_script(name: str):
     return actions.run_script(name)
+
+
+# "close/minimize all" registered ahead of the single-app patterns right below
+# -- otherwise those catch-alls would grab "all"/"everything" as if it were a
+# literal app name to look for, instead of ever reaching these.
+@intent(r"^close\s+(?:all|everything)(?:\s+(?:apps|applications|windows))?$")
+def _close_all_apps():
+    return actions.close_all_apps()
+
+
+@intent(r"^(?:minimize|minimise)\s+(?:all|everything)(?:\s+(?:apps|applications|windows))?$")
+def _minimize_all_windows():
+    return actions.minimize_all_windows()
 
 
 @intent(r"^(?:close|kill)\s+(.+)$")

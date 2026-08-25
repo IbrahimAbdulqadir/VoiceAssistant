@@ -301,6 +301,65 @@ def show_desktop() -> str:
     return msg
 
 
+def minimize_all_windows() -> str:
+    # Shell.Application's MinimizeAll() always minimizes -- unlike ToggleDesktop()
+    # above (show_desktop()), which flips state, so calling it a second time
+    # would restore everything instead of minimizing. "minimize everything" is
+    # meant to be a one-way action, so this uses the non-toggling call.
+    import win32com.client
+
+    win32com.client.Dispatch("Shell.Application").MinimizeAll()
+    msg = "Minimized all windows."
+    log.info(msg)
+    return msg
+
+
+def close_all_apps(confirm: ConfirmFn = _default_confirm) -> str:
+    """Closes every open app window via WM_CLOSE, not TerminateProcess -- gives
+    each app the chance to prompt "save changes?" the way Alt+F4 would, since
+    the blast radius here is every unsaved document in every open app at once,
+    not just one target the way close_app's is. Skips
+    config.protected_processes, same as close_app -- that list already
+    includes explorer.exe (the shared desktop shell) and python.exe/
+    pythonw.exe (this assistant's own process), so neither the desktop nor the
+    assistant itself is ever closed by this."""
+    protected = config.protected_processes
+    hwnds: List[int] = []
+    names: Set[str] = set()
+
+    def _enum_handler(hwnd, _):
+        if not win32gui.IsWindowVisible(hwnd) or not win32gui.GetWindowText(hwnd):
+            return
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        try:
+            pname = (psutil.Process(pid).name() or "").lower()
+        except psutil.Error:
+            return
+        if pname in protected:
+            return
+        hwnds.append(hwnd)
+        names.add(pname)
+
+    win32gui.EnumWindows(_enum_handler, None)
+
+    if not hwnds:
+        msg = "No open app windows to close."
+        log.info(msg)
+        return msg
+
+    if not VOICE_MODE and not confirm(f"Close all {len(hwnds)} open window(s) ({', '.join(sorted(names))})?"):
+        msg = "Cancelled."
+        log.info("User declined to close all apps.")
+        return msg
+
+    for hwnd in hwnds:
+        win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
+
+    msg = f"Closed {len(hwnds)} window(s)."
+    log.info(msg)
+    return msg
+
+
 def open_notifications() -> str:
     _press_hotkey(win32con.VK_LWIN, ord("N"))
     msg = "Opened notification center."
@@ -466,8 +525,17 @@ def screen_off() -> str:
     every wake-word detection. Real Sleep suspends this process too, which would
     make voice-waking impossible -- that's a hard OS/hardware limitation, not
     something this can work around, so this is the only way "screen off, wake it
-    with my voice" is actually achievable."""
-    win32gui.SendMessage(win32con.HWND_BROADCAST, win32con.WM_SYSCOMMAND, win32con.SC_MONITORPOWER, 2)
+    with my voice" is actually achievable.
+
+    Uses PostMessage, not SendMessage -- SendMessage to HWND_BROADCAST is
+    synchronous and blocks until *every* top-level window on the system has
+    finished handling the message, so a single slow/hung window anywhere would
+    freeze this call, and with wake_display() below calling this every wake
+    word, that froze the entire audio thread the instant the wake word fired
+    (confirmed live: the process's CPU time stopped advancing entirely right
+    after "Wake word detected" logged, with nothing after it -- a real hang,
+    not just slow). PostMessage queues the message and returns immediately."""
+    win32gui.PostMessage(win32con.HWND_BROADCAST, win32con.WM_SYSCOMMAND, win32con.SC_MONITORPOWER, 2)
     msg = "Turned off the screen."
     log.info(msg)
     return msg
@@ -476,11 +544,13 @@ def screen_off() -> str:
 def wake_display() -> None:
     """Turns the display back on -- called by listen.py on every wake-word
     detection (not exposed as its own voice command) so screen_off() above can
-    always be undone just by saying the wake word again. -1 ("on") isn't an
-    officially documented SC_MONITORPOWER value (Microsoft only documents 1 and
+    always be undone just by saying the wake word again. PostMessage, not
+    SendMessage -- see screen_off()'s docstring; this one is the one that
+    actually froze the listener. -1 ("on") isn't an officially documented
+    SC_MONITORPOWER value (Microsoft only documents 1 and
     2), but it's the universally-used way to turn the monitor back on and works
     reliably in practice. A no-op (harmless) when the display is already on."""
-    win32gui.SendMessage(win32con.HWND_BROADCAST, win32con.WM_SYSCOMMAND, win32con.SC_MONITORPOWER, -1)
+    win32gui.PostMessage(win32con.HWND_BROADCAST, win32con.WM_SYSCOMMAND, win32con.SC_MONITORPOWER, -1)
 
 
 def minimize_app(name: str) -> str:

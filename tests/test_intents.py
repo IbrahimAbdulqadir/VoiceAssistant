@@ -28,6 +28,24 @@ class TestIntentRouting(unittest.TestCase):
         execute("close spotify")
         mock_close.assert_called_once_with("spotify")
 
+    @patch("assistant.executor.actions.close_app")
+    @patch("assistant.executor.actions.close_all_apps", return_value="ok")
+    def test_close_all_beats_close_app_catchall(self, mock_close_all, mock_close_app):
+        for phrase in ["close all", "close everything", "close all apps", "close all windows"]:
+            mock_close_all.reset_mock()
+            execute(phrase)
+            mock_close_all.assert_called_once_with()
+            mock_close_app.assert_not_called()
+
+    @patch("assistant.executor.actions.minimize_app")
+    @patch("assistant.executor.actions.minimize_all_windows", return_value="ok")
+    def test_minimize_all_beats_minimize_app_catchall(self, mock_minimize_all, mock_minimize_app):
+        for phrase in ["minimize all", "minimize everything", "minimise all windows"]:
+            mock_minimize_all.reset_mock()
+            execute(phrase)
+            mock_minimize_all.assert_called_once_with()
+            mock_minimize_app.assert_not_called()
+
     @patch("assistant.executor.actions.open_folder", return_value="ok")
     def test_open_folder_beats_catchall(self, mock_folder):
         execute("open folder C:/Users/me/Documents")

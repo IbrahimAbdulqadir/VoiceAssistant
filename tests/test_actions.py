@@ -4,7 +4,7 @@ must never be runnable, and close_app must never proceed without confirmation.""
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from assistant import actions
 
@@ -64,6 +64,75 @@ class TestCloseApp(unittest.TestCase):
         with self.assertRaises(actions.ActionError) as ctx:
             actions.close_app("nonexistentapp", confirm=lambda p: True)
         self.assertIn("No running process", str(ctx.exception))
+
+
+class TestCloseAllApps(unittest.TestCase):
+    @staticmethod
+    def _fake_enum_windows(hwnds):
+        def enum(handler, _arg):
+            for hwnd in hwnds:
+                handler(hwnd, None)
+
+        return enum
+
+    @patch("assistant.actions.win32gui.PostMessage")
+    @patch("psutil.Process")
+    @patch("assistant.actions.win32process.GetWindowThreadProcessId")
+    @patch("assistant.actions.win32gui.GetWindowText", return_value="Some Window")
+    @patch("assistant.actions.win32gui.IsWindowVisible", return_value=True)
+    @patch("assistant.actions.win32gui.EnumWindows")
+    def test_closes_non_protected_windows_and_skips_protected(
+        self, mock_enum, mock_visible, mock_title, mock_gwtpid, mock_process, mock_post
+    ):
+        mock_enum.side_effect = self._fake_enum_windows([1, 2])
+        mock_gwtpid.side_effect = lambda hwnd: (0, 100 if hwnd == 1 else 200)
+
+        def fake_process(pid):
+            p = MagicMock()
+            p.name.return_value = "notepad.exe" if pid == 100 else "explorer.exe"
+            return p
+
+        mock_process.side_effect = fake_process
+
+        result = actions.close_all_apps(confirm=lambda p: True)
+        # Only hwnd 1 (notepad.exe, not protected) gets closed -- hwnd 2
+        # (explorer.exe, protected) must be skipped.
+        mock_post.assert_called_once_with(1, actions.win32con.WM_CLOSE, 0, 0)
+        self.assertIn("Closed 1", result)
+
+    @patch("assistant.actions.win32gui.EnumWindows")
+    def test_no_windows_to_close(self, mock_enum):
+        mock_enum.side_effect = self._fake_enum_windows([])
+        result = actions.close_all_apps(confirm=lambda p: True)
+        self.assertIn("No open app windows", result)
+
+    @patch("assistant.actions.win32gui.PostMessage")
+    @patch("psutil.Process")
+    @patch("assistant.actions.win32process.GetWindowThreadProcessId", return_value=(0, 100))
+    @patch("assistant.actions.win32gui.GetWindowText", return_value="Notepad")
+    @patch("assistant.actions.win32gui.IsWindowVisible", return_value=True)
+    @patch("assistant.actions.win32gui.EnumWindows")
+    def test_declined_does_not_close_anything(
+        self, mock_enum, mock_visible, mock_title, mock_gwtpid, mock_process, mock_post
+    ):
+        mock_enum.side_effect = self._fake_enum_windows([1])
+        proc = MagicMock()
+        proc.name.return_value = "notepad.exe"
+        mock_process.return_value = proc
+
+        result = actions.close_all_apps(confirm=lambda p: False)
+        mock_post.assert_not_called()
+        self.assertEqual(result, "Cancelled.")
+
+
+class TestMinimizeAllWindows(unittest.TestCase):
+    def test_calls_shell_minimize_all_not_toggle(self):
+        with patch("win32com.client.Dispatch") as mock_dispatch:
+            actions.minimize_all_windows()
+            mock_dispatch.assert_called_once_with("Shell.Application")
+            # MinimizeAll(), not ToggleDesktop() -- must always minimize, never
+            # restore, unlike show_desktop().
+            mock_dispatch.return_value.MinimizeAll.assert_called_once()
 
 
 class TestOpenAppSearchFallback(unittest.TestCase):
@@ -170,17 +239,21 @@ class TestPowerManagement(unittest.TestCase):
         actions.lock_screen()
         mock_lock.assert_called_once()
 
-    @patch("assistant.actions.win32gui.SendMessage")
-    def test_screen_off_sends_monitor_off(self, mock_send):
+    @patch("assistant.actions.win32gui.PostMessage")
+    def test_screen_off_sends_monitor_off(self, mock_post):
+        # PostMessage, not SendMessage -- SendMessage to HWND_BROADCAST blocks
+        # until every top-level window handles it, and this is on the hot
+        # wake-word path (via wake_display() below), so a blocking call here
+        # once froze the whole listener for real.
         actions.screen_off()
-        mock_send.assert_called_once_with(
+        mock_post.assert_called_once_with(
             actions.win32con.HWND_BROADCAST, actions.win32con.WM_SYSCOMMAND, actions.win32con.SC_MONITORPOWER, 2
         )
 
-    @patch("assistant.actions.win32gui.SendMessage")
-    def test_wake_display_sends_monitor_on(self, mock_send):
+    @patch("assistant.actions.win32gui.PostMessage")
+    def test_wake_display_sends_monitor_on(self, mock_post):
         actions.wake_display()
-        mock_send.assert_called_once_with(
+        mock_post.assert_called_once_with(
             actions.win32con.HWND_BROADCAST, actions.win32con.WM_SYSCOMMAND, actions.win32con.SC_MONITORPOWER, -1
         )
 
