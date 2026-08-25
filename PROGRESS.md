@@ -2,6 +2,32 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-25, latest) — "refresh system" implemented: re-scans installed apps
+
+The last remaining NEXT AGENDA item ("refresh system" -- requested but
+ambiguous) was resolved with a one-line answer from the user: it means
+re-scanning for newly installed apps, not an Explorer/desktop refresh.
+
+- New `actions.refresh_system()` (`assistant/actions.py`) -- thin wrapper
+  around the existing `app_discovery.discover_apps(force=True)` (this call
+  already existed and already did exactly this; it just had no voice/LLM
+  entry point at all until now). Returns a count of apps found so the spoken
+  "Done" response can carry real information.
+- New executor intent (`assistant/executor.py`): `refresh system` / `refresh
+  the system` / `rescan` / `rescan apps` / `rescan for new apps`, registered
+  alongside `list apps`/`help`. Documented in `HELP_TEXT`.
+- Also exposed as an LLM tool (`llm_backend.py` TOOLS/DISPATCH) for
+  oddly-phrased requests, same pattern as `list_known_apps`.
+- 2 new tests (`TestRefreshSystem` in `test_actions.py` confirming
+  `force=True` and the count message; `test_refresh_system` in
+  `test_intents.py` confirming all five phrasings route correctly). All 96
+  tests pass.
+- Listener restart needed the schtasks workaround again (see the 2026-08-24
+  entry on this) -- `Stop-Process`/`Start-ScheduledTask` alone didn't kill
+  the running `pythonw.exe`; `schtasks /end /tn VoiceAssistantListener` did,
+  then `Stop-ScheduledTask` + `Start-ScheduledTask` brought up a fresh
+  instance (PID confirmed changed, indicator window placed in the log).
+
 ## Follow-up session (2026-08-25, most recent) — "close/minimize all apps" added; the just-added wake_display() was actually freezing the listener on every wake word
 
 User: "I want it to be able to minimize and close all apps ... also learn to
@@ -972,12 +998,14 @@ say it should be able to do this again." Everything below is a **capability
 gap** (a real, missing feature), not a bug in something that already exists --
 distinct from everything fixed above.
 
-**Items 2 (folder creation) and 4 (audio confirmation, expanded to also cover
-failure/didn't-understand feedback) are done** as of the 2026-08-24 session
-above — kept in numbering below for reference to the original request, but
-see that section for what shipped. **Items 1 (power actions) and 3 (refresh
-system) are still outstanding** and still need the safety design / clarifying
-question called out below before building, not a guess.
+**All four items are now done.** Items 2 (folder creation) and 4 (audio
+confirmation, expanded to also cover failure/didn't-understand feedback)
+shipped in the 2026-08-24 session above. Item 1 (power actions) shipped in a
+later 2026-08-25 session (shutdown/restart/hibernate/lock/screen-off, with
+native-dialog confirmation). Item 3 (refresh system) shipped in the
+2026-08-25 session at the very top of this file, once the user clarified it
+means re-scanning installed apps. Kept in numbering below for reference to
+the original requests.
 
 **Standing preference driving all of this** (said directly, applies beyond
 just this list): the user does not want the assistant's capabilities to grow
