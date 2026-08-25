@@ -2,6 +2,75 @@
 
 This captures everything done, current state, and exactly what to pick up next.
 
+## Follow-up session (2026-08-25/26) — Spiderman "settling down" and talking unprompted, indicator never flashing
+
+User: "spiderman will just settle down and be saying things like I can't hear
+you Ibrahim, even when voice isn't activated... it just said I couldn't
+understand that without me saying anything or even the spider web turning
+red." Root-caused against `logs/assistant.log`, not guessed -- a full scan of
+every `Wake word detected` line found **884 wake-word detections logged since
+2026-08-22**, with several tonight producing a recording that was 20+ seconds
+long but contained only 0.3-0.7s of real detected audio, transcribing to
+nothing, and unconditionally speaking "I don't understand"/"I didn't catch
+that" as a result -- exactly the reported symptom. Real, intentional triggers
+tonight scored 0.94-0.98; the false ones scored 0.92-0.98, the *same* range --
+confirming in fresh data what an earlier session ("Wake threshold" section
+below) had already concluded from a full retraining attempt: `WAKE_THRESHOLD`
+tuning alone cannot separate real triggers from false ones here, since their
+score distributions overlap. The indicator itself had zero logged failures
+tonight (every restart placed its window successfully, `indicator.activate()`
+is called unconditionally on every detection) -- no code-level evidence it's
+actually failing to render red; more likely these are unattended/background
+moments the user wasn't looking at the corner during, or a covering-window
+race inside the up-to-1-second gap between the indicator's own topmost
+reassertions.
+
+Asked the user directly how to handle the false-trigger rate (given
+retraining is a real option already flagged as unresolved, but a bigger
+effort) and whether misfires should stay silent. They chose: retrain the
+model with more negatives (not done this session -- needs real audio data
+collection, out of scope for a code change), add a VAD gate before the wake
+model fires, still raise `WAKE_THRESHOLD` as a stopgap, and stay silent when
+a misfire caught nothing. Implemented the three doable-now pieces in
+`assistant/listen.py`:
+
+- **VAD gate on wake-word acceptance**: the Silero VAD (already loaded, only
+  previously used *during* an active recording to detect end-of-speech) now
+  gets fed every frame in the main detection loop too, into a rolling
+  `WAKE_VAD_GATE_FRAMES` (~0.6s) window. A wake-word detection is only
+  honored if real speech (VAD >= `SILENCE_THRESHOLD`) showed up somewhere in
+  that recent window -- rejects triggers firing on pure noise/silence (hum, a
+  door, electrical interference) without touching `WAKE_THRESHOLD` at all.
+  Verified live: caught 2 such false triggers (scores 0.97, 0.91) in the
+  first 15 seconds after restart, logged as "no real speech in the preceding
+  0.6s -- treating as a false trigger on background noise" instead of
+  recording 21s of silence. **Known limit, told to the user up front**: this
+  only filters noise/silence triggers -- it can't catch a false trigger
+  during *real* background conversation not directed at the assistant, since
+  VAD only tells speech apart from non-speech, not "the wake word" from any
+  other word. That case still needs the retraining the user deferred.
+- **`WAKE_THRESHOLD` code default raised 0.6 -> 0.9** to match what
+  `config/.env` already had it overridden to from the earlier session -- no
+  behavior change today, just keeps the code's own default honest for
+  anyone running without that override.
+- **Silent on empty misfires**: `_process_command` gained a `had_real_speech`
+  parameter, set from `speech_frames_seen` (already tracked in the recording
+  loop for the existing early-stop logic) or `True` whenever the fast lane
+  matched. An empty transcription now only speaks "I didn't catch that" when
+  there was real detected speech Whisper still failed to parse -- a misfire
+  that caught nothing at all now logs and stays quiet instead of announcing
+  itself to an empty room.
+- 3 new tests in `tests/test_listen.py` (silent path, spoken-feedback path,
+  and the had_real_speech-defaults-True fallback for existing callers). All
+  99 tests pass. Listener restarted via the `schtasks /end` +
+  `Stop-ScheduledTask`/`Start-ScheduledTask` sequence (plain `Stop-Process`
+  alone didn't kill the Task-Scheduler-owned process, same as noted in
+  earlier sessions) and confirmed live in the log.
+- **Not done, flagged to the user**: actually retraining the wake model with
+  real ambient-noise/conversation negatives -- the only fix for false
+  triggers during real background speech, not just silence/noise. Revisit if
+  the VAD gate alone doesn't cut the nuisance rate enough in practice.
+
 ## Follow-up session (2026-08-25, latest) — "refresh system" implemented: re-scans installed apps
 
 The last remaining NEXT AGENDA item ("refresh system" -- requested but
